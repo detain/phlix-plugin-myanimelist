@@ -1,15 +1,17 @@
 {
-    "name": "phlix-plugin-example",
+    "name": "phlix-plugin-myanimelist",
     "version": "0.1.0",
     "phlix_min_server_version": "0.10.0",
     "type": "metadata-provider",
-    "entry": "Phlix\\PluginExample\\HelloMetadataProvider",
+    "entry": "Phlix\\Myanimelist\\MyanimelistMetadataProvider",
     "events": [],
     "settings": {
-        "greeting": {
+        "client_id": {
             "type": "string",
-            "required": false,
-            "default": "Hello, World"
+            "required": true,
+            "secret": true,
+            "label": "MyAnimeList Client ID",
+            "description": "Your MAL API client ID (from https://myanimelist.net/apiconfig). Sent as the X-MAL-CLIENT-ID header."
         }
     },
     "signature": null

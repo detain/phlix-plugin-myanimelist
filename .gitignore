@@ -4,3 +4,15 @@
 /coverage-report/
 /.phpunit.cache/
 /.phpunit.result.cache
+
+# Caliber local state
+.caliber/
+# Ignore all Claude CLI personal files and state
+.claude/
+!.claude/settings.json
+!.claude/rules/
+!.claude/skills/
+!.claude/hooks/
+.opencode/node_modules/
+.opencode/memory/
+.opencode/.env

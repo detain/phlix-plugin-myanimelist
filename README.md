@@ -1,110 +1,119 @@
-# phlix-plugin-example
+# phlix-plugin-myanimelist
 
-[![tests](https://github.com/detain/phlix-plugin-example/actions/workflows/test.yml/badge.svg)](https://github.com/detain/phlix-plugin-example/actions/workflows/test.yml)
+[![tests](https://github.com/detain/phlix-plugin-myanimelist/actions/workflows/test.yml/badge.svg)](https://github.com/detain/phlix-plugin-myanimelist/actions/workflows/test.yml)
 
-> Reference **metadata-provider** plugin for [Phlix](https://github.com/detain/phlix)
-> — the smallest plugin that exercises the full Phase A loader lifecycle.
+> MyAnimeList metadata provider plugin for [Phlix](https://github.com/detain/phlix)
+> — anime titles, descriptions, episodes, ratings via the MyAnimeList API v2.
 
-This repo is the canonical hello-world template for Phlix plugin
-authors. It does almost nothing on purpose: it implements the
-`Phlix\Plugins\Contract\LifecycleInterface` contract introduced in
-Phlix Step A.4, returns a fixed greeting when asked about one
-well-known fixture path, and ships with a CI workflow plus PHPUnit
-tests so you can fork it as a starter and replace the lookup logic
-with the real one.
+## Overview
 
-## What it does
+This plugin fetches structured anime metadata from [MyAnimeList](https://myanimelist.net/)
+using the official **MAL API v2** (`https://api.myanimelist.net/v2`):
 
-When the host calls `HelloMetadataProvider::lookup('/test/hello.mkv')`
-the plugin returns:
+1. **Search** (`GET /anime?q=...`) — resolve a filename to a MAL anime ID
+2. **Details** (`GET /anime/{id}?fields=...`) — fetch titles, synopsis, episodes, rating, studio
 
-```php
-['title' => 'Hello, World']
-```
+Every request carries an `X-MAL-CLIENT-ID` header with your MAL client ID.
 
-Any other path returns an empty array. The greeting is read from the
-`greeting` setting in `plugin.json` (default `"Hello, World"`) so
-operators can flip it without forking the code.
+## Features
+
+- **Title search** — query MAL for the best-matching anime ID
+- **Full metadata** — primary/English/Japanese titles, synonyms, genres, year, type, rating
+- **Episode info** — episode count and average episode runtime
+- **Synopsis** — long-form description text
+- **No SDK** — plain HTTP/JSON over the PHP stream wrapper; no extra dependencies
 
 ## Install
 
-The plugin is unsigned by design — it's a reference implementation,
-not something the trusted-key allowlist should pin. Install via the
-Phlix admin UI:
+The plugin is unsigned by design. Install via the Phlix admin UI:
 
-1. Log in to your Phlix server as an admin user
-   (`users.is_admin = 1`).
+1. Log in to your Phlix server as an admin user (`users.is_admin = 1`).
 2. Browse to `/admin/plugins`.
-3. Paste this URL into the **Install from URL** form and submit:
+3. Paste this URL into the **Install from URL** form:
 
    ```
-   https://raw.githubusercontent.com/detain/phlix-plugin-example/main/plugin.json
+   https://raw.githubusercontent.com/detain/phlix-plugin-myanimelist/main/plugin.json
    ```
 
-4. The server downloads the manifest, validates it against
-   `docs/plugins/manifest.schema.json`, runs
-   `composer install --no-dev`, and stores a row in the `plugins`
-   table. The plugin lands **disabled** by default.
-5. Flip the toggle in the table to enable it.
+4. The server downloads and validates the manifest, runs `composer install --no-dev`, and stores a row in the `plugins` table.
+5. Configure your MyAnimeList client ID in the plugin settings form.
+6. Enable the plugin.
 
-The same operations are reachable via the JSON API; see
-[`docs/plugins/install-from-url.md`](https://github.com/detain/phlix/blob/master/docs/plugins/install-from-url.md)
-in the main Phlix repo for the `curl` recipes.
+### Getting a MAL Client ID
 
-## Use
+1. Sign in at [myanimelist.net](https://myanimelist.net/).
+2. Go to [API → Create ID](https://myanimelist.net/apiconfig).
+3. Create an app and copy the **Client ID** (the Client Secret is not needed for read-only metadata).
 
-Once enabled, ask the metadata layer to look up the fixture path. The
-exact API path depends on which Phlix version you're on, but the
-plugin's behaviour is fixed:
+## Configuration
+
+| Setting | Type | Required | Description |
+|---------|------|----------|-------------|
+| `client_id` | string (secret) | Yes | Your MAL API client ID, sent as the `X-MAL-CLIENT-ID` header |
+
+## How It Works
+
+When the MetadataManager calls `lookup($filePath)`:
+
+1. **Parse filename** — extract anime title from file path (strips S##E##, group tags, resolution suffixes)
+2. **Search** — `GET /anime?q=<title>&limit=10` and take the first result's ID
+3. **Fetch details** — `GET /anime/{id}?fields=...` for full anime data
+4. **Map response** — translate the MAL JSON layout to MetadataManager's expected return shape
+
+## MAL API Notes
+
+- **Protocol**: REST/JSON over HTTPS to `https://api.myanimelist.net/v2`
+- **Auth**: every request sends `X-MAL-CLIENT-ID: <client_id>`
+- **Search**: `GET /anime?q=<query>&limit=10` → `{ "data": [ { "node": { "id", "title", ... } } ] }`
+- **Details**: `GET /anime/{id}?fields=id,title,main_picture,alternative_titles,start_date,synopsis,mean,num_scoring_users,genres,num_episodes,media_type,status,studios,average_episode_duration,rating`
+
+See the [MAL API v2 reference](https://myanimelist.net/apiconfig/references/api/v2) for full details.
+
+## Data Returned
 
 ```php
-$provider = $container->get(\Phlix\PluginExample\HelloMetadataProvider::class);
-$provider->lookup('/test/hello.mkv'); // ['title' => 'Hello, World']
-$provider->lookup('/anything/else');  // []
+[
+    'title'         => 'Cowboy Bebop',          // Primary title
+    'original_name' => 'カウボーイビバップ',       // Japanese title (falls back to title)
+    'overview'      => 'In the year 2071...',   // Synopsis
+    'year'          => 1998,                     // First-aired year
+    'genres'        => ['Action', 'Sci-Fi'],     // Genre names
+    'rating'        => 8.75,                     // MAL mean score (0-10)
+    'vote_count'    => 900000,                   // Number of scoring users
+    'poster_url'    => 'https://cdn.myanimelist.net/images/anime/4/19644l.jpg',
+    'fanart_url'    => null,                      // MAL has no fanart/backdrop
+    'episodes'      => 26,                        // Episode count
+    'type'          => 'tv',                      // tv / movie / ova / special / ona / music
+    'mal_id'        => 1,                         // MyAnimeList anime ID
+    'titles'        => ['Cowboy Bebop', 'カウボーイビバップ', 'Cowboy Bebop (1998)'],
+    'status'        => 'Finished',               // Finished / Currently Airing / Upcoming
+    'runtime_ticks' => 14400000000,              // Avg episode length in ticks (1s = 10,000,000)
+    'studio'        => 'Sunrise',                // First studio name
+]
 ```
 
-The fixture path lives at
-`Phlix\PluginExample\HelloMetadataProvider::FIXTURE_PATH` if you want
-to reference it from tests.
+A no-match returns `[]`.
 
-## Fork as a starter
+## Fork as a Starter
 
-This repository is intentionally small (one PHP class, one test
-file) so you can copy it as the seed for your own plugin:
+This plugin is based on [`phlix-plugin-example`](https://github.com/detain/phlix-plugin-example). To create your own metadata provider:
 
-1. **Fork** or `git clone` this repo, then rename the new directory.
-2. Edit **`plugin.json`** — pick a new `name` (must start with
-   `phlix-plugin-`), bump `version` back to `0.1.0`, change `entry`
-   to your FQCN, and (optionally) declare event aliases under
-   `events` if you want to subscribe to playback / library / auth
-   events. See the full schema in
-   [`docs/plugins/manifest.schema.json`](https://github.com/detain/phlix/blob/master/docs/plugins/manifest.schema.json)
-   in the main repo.
-3. Edit **`composer.json`** — rename the package, change the PSR-4
-   prefix under `autoload.psr-4`.
-4. Rewrite **`src/HelloMetadataProvider.php`** with your own
-   implementation. Keep `onEnable()` cheap; do the heavy work in the
-   listener methods declared by `subscribedEvents()`.
-5. Replace the tests in **`tests/`** to match. The CI workflow in
-   `.github/workflows/test.yml` runs them on every push.
-6. Push to a public Git host. Tell operators to paste the raw URL of
-   your `plugin.json` into `/admin/plugins`.
+1. Fork or copy this repository.
+2. Edit `plugin.json` — pick a new `name` (must start with `phlix-plugin-`), bump `version` to `0.1.0`, change `entry` to your FQCN.
+3. Edit `composer.json` — rename the package, update PSR-4 autoload prefix.
+4. Replace `src/MyanimelistMetadataProvider.php` with your own implementation.
+5. Run tests: `composer install && vendor/bin/phpunit`.
 
-The plugin developer guide in the main Phlix repo has the full
-walkthrough, including the lifecycle diagram and the manifest event
-alias table:
-
-- [`docs/plugins/developer-guide.md`](https://github.com/detain/phlix/blob/master/docs/plugins/developer-guide.md)
-- [`docs/plugins/manifest.md`](https://github.com/detain/phlix/blob/master/docs/plugins/manifest.md)
-- [`docs/plugins/install-from-url.md`](https://github.com/detain/phlix/blob/master/docs/plugins/install-from-url.md)
-- [`docs/plugins/trusted-plugin-list.md`](https://github.com/detain/phlix/blob/master/docs/plugins/trusted-plugin-list.md)
-
-## Running the tests locally
+## Testing
 
 ```bash
 composer install
 vendor/bin/phpunit
+vendor/bin/phpunit --testdox  # verbose output
 ```
+
+The unit tests exercise the parse/map helpers via Reflection with fixture
+JSON — no live network calls are made.
 
 ## License
 

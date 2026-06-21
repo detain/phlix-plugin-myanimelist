@@ -1,13 +1,14 @@
 {
-    "name": "detain/phlix-plugin-example",
+    "name": "detain/phlix-plugin-myanimelist",
     "type": "phlix-plugin",
-    "description": "Hello-world metadata provider — reference plugin for Phlix authors.",
+    "description": "MyAnimeList metadata provider — anime titles, descriptions, episodes, ratings via the MAL API v2.",
     "license": "MIT",
-    "keywords": ["phlix", "phlix-plugin", "metadata-provider", "example"],
-    "homepage": "https://github.com/detain/phlix-plugin-example",
+    "keywords": ["phlix", "phlix-plugin", "metadata-provider", "myanimelist", "mal", "anime"],
+    "homepage": "https://github.com/detain/phlix-plugin-myanimelist",
     "require": {
         "php": ">=8.3",
         "psr/container": "^1.1 || ^2.0",
+        "psr/log": "^1.0 || ^2.0 || ^3.0",
         "detain/phlix-shared": "^0.6"
     },
     "require-dev": {
@@ -18,12 +19,12 @@
     ],
     "autoload": {
         "psr-4": {
-            "Phlix\\PluginExample\\": "src/"
+            "Phlix\\Myanimelist\\": "src/"
         }
     },
     "autoload-dev": {
         "psr-4": {
-            "Phlix\\PluginExample\\Tests\\": "tests/"
+            "Phlix\\Myanimelist\\Tests\\": "tests/"
         }
     },
     "config": {

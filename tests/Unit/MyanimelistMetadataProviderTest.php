@@ -48,6 +48,12 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $this->assertSame([], $this->makeProvider()->subscribedEvents());
     }
 
+    public function test_lookup_returns_empty_for_unparseable_filename(): void
+    {
+        // 'S01E01' strips to '' (< 2 chars) → lookup short-circuits before any HTTP.
+        $this->assertSame([], $this->makeProvider()->lookup('/anime/S01E01.mkv'));
+    }
+
     // -------------------------------------------------------------------------
     // extractAnimeName
     // -------------------------------------------------------------------------
@@ -214,6 +220,63 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $result = $this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$decoded]);
 
         $this->assertNull($result);
+    }
+
+    public function test_parse_extracts_fanart_from_additional_pictures(): void
+    {
+        $json = '{"id":9,"title":"With Art","main_picture":{"large":"poster.jpg"},'
+            . '"pictures":[{"medium":"fan-med.jpg","large":"fan-large.jpg"},{"large":"second.jpg"}]}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        /** @var array<string, mixed> $result */
+        $result = $this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$decoded]);
+
+        // poster comes from main_picture; fanart from the first additional picture (large preferred)
+        $this->assertSame('poster.jpg', $result['poster_url']);
+        $this->assertSame('fan-large.jpg', $result['fanart_url']);
+    }
+
+    public function test_parse_fanart_falls_back_to_medium_then_null(): void
+    {
+        $withMedium = json_decode('{"id":1,"title":"X","pictures":[{"medium":"m.jpg"}]}', true);
+        $noPictures = json_decode('{"id":2,"title":"Y"}', true);
+
+        /** @var array<string, mixed> $a */
+        $a = $this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$withMedium]);
+        /** @var array<string, mixed> $b */
+        $b = $this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$noPictures]);
+
+        $this->assertSame('m.jpg', $a['fanart_url']);
+        $this->assertNull($b['fanart_url']);
+    }
+
+    public function test_map_passes_through_fanart_url(): void
+    {
+        $parsed = [
+            'id'             => 4,
+            'title'          => 'Art Show',
+            'en_title'       => null,
+            'ja_title'       => null,
+            'synonyms'       => [],
+            'synopsis'       => null,
+            'year'           => null,
+            'genres'         => [],
+            'rating'         => null,
+            'vote_count'     => null,
+            'poster_url'     => 'p.jpg',
+            'fanart_url'     => 'backdrop.jpg',
+            'episodes'       => 12,
+            'media_type'     => 'tv',
+            'status'         => 'finished_airing',
+            'studio'         => null,
+            'episode_length' => null,
+        ];
+
+        /** @var array<string, mixed> $result */
+        $result = $this->invokePrivate($this->makeProvider(), 'mapToMetadataReturn', [$parsed]);
+
+        $this->assertSame('backdrop.jpg', $result['fanart_url']);
     }
 
     // -------------------------------------------------------------------------

@@ -10,19 +10,25 @@ use Psr\Container\ContainerInterface;
 /**
  * MyAnimeList (MAL) metadata provider plugin for Phlix.
  *
- * Fetches anime metadata (titles, descriptions, episodes, ratings) from the
- * official MyAnimeList API v2 over HTTPS/JSON.
+ * Fetches anime metadata (titles, descriptions, episodes, ratings, images) from
+ * the official MyAnimeList API v2 over HTTPS/JSON.
  *
  * ## Features
  *
  * - MAL API v2 integration (search + details) over HTTP/JSON
  * - Client-ID authentication via the `X-MAL-CLIENT-ID` header
+ * - Rate limiting — ~1 request/second to respect MAL's implicit limit
+ * - In-memory response caching — identical URLs are fetched once per session
+ * - Optional SSL verification toggle (`use_ssl_verification`) for self-hosted proxies
+ * - Connectivity/credential check on enable (fails fast on a bad Client ID)
  * - Filename heuristics to extract a clean search query
+ * - Poster (main_picture) + fanart (additional `pictures`) image extraction
  * - Maps MAL responses to Phlix MetadataManager's expected return shape
  *
  * ## Configuration (plugin.json settings)
  *
  * - client_id: MyAnimeList API client ID (required, secret)
+ * - use_ssl_verification: verify TLS certificates (optional, default true)
  *
  * ## Protocol notes
  *
@@ -58,11 +64,20 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
     private const HTTP_TIMEOUT_SEC = 10;
 
     /**
+     * Minimum interval between API requests in seconds (rate protection).
+     *
+     * MAL suggests approximately one request per second.
+     */
+    private const RATE_LIMIT_INTERVAL_SEC = 1.0;
+
+    /**
      * Fields requested from the MAL anime-details endpoint.
+     *
+     * `pictures` is requested so a backdrop/fanart image can be derived.
      */
     private const DETAIL_FIELDS = 'id,title,main_picture,alternative_titles,start_date,'
         . 'synopsis,mean,num_scoring_users,genres,num_episodes,media_type,status,'
-        . 'studios,average_episode_duration,rating';
+        . 'studios,average_episode_duration,rating,pictures';
 
     /**
      * Number of ticks per second (host convention: 1s = 10,000,000 100ns ticks).
@@ -72,7 +87,7 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
     /**
      * Plugin settings from plugin.json.
      *
-     * @var array{client_id: string}
+     * @var array{client_id: string, use_ssl_verification?: bool}
      */
     private array $settings;
 
@@ -82,9 +97,22 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
     private ?ContainerInterface $container = null;
 
     /**
-     * @param array{client_id: string} $settings Plugin settings from plugin.json.
-     *     client_id is the MyAnimeList API client ID, sent as the
-     *     X-MAL-CLIENT-ID header on every request.
+     * Unix timestamp (with microseconds) of the last API request, for rate limiting.
+     */
+    private float $lastRequestTimestamp = 0.0;
+
+    /**
+     * In-memory response cache: md5(url) => decoded JSON object.
+     *
+     * @var array<string, array<string, mixed>>
+     */
+    private array $cache = [];
+
+    /**
+     * @param array{client_id: string, use_ssl_verification?: bool} $settings
+     *     Plugin settings from plugin.json. client_id is the MyAnimeList API
+     *     client ID, sent as the X-MAL-CLIENT-ID header on every request.
+     *     use_ssl_verification toggles TLS certificate verification (default true).
      */
     public function __construct(array $settings)
     {
@@ -94,29 +122,42 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
     /**
      * Called by the loader once when the plugin is enabled.
      *
-     * Stashes the host container so later metadata lookups can resolve
-     * services lazily. MAL needs no persistent connection — keep this cheap.
+     * Stashes the host container and performs a lightweight connectivity +
+     * credential check (a one-result search) so a bad Client ID or unreachable
+     * MAL surfaces immediately rather than on the first library scan.
      *
      * @param ContainerInterface $container Host PSR-11 container.
      *
      * @return void
+     *
+     * @throws \RuntimeException If MAL is unreachable or the Client ID is rejected.
      */
     public function onEnable(ContainerInterface $container): void
     {
         $this->container = $container;
+
+        $check = $this->httpGetJson(
+            self::API_BASE . '/anime?q=test&limit=1&fields=id'
+        );
+        if ($check === null) {
+            throw new \RuntimeException(
+                'MyAnimeList API unreachable. Check your Client ID and network connectivity.'
+            );
+        }
     }
 
     /**
      * Called by the loader once when the plugin is disabled.
      *
-     * Releases the stashed container reference. MAL holds no open sockets,
-     * so there is nothing else to tear down.
+     * Releases the stashed container reference and drops the response cache.
+     * MAL holds no open sockets, so there is nothing else to tear down.
      *
      * @return void
      */
     public function onDisable(): void
     {
         $this->container = null;
+        $this->cache = [];
     }
 
     /**
@@ -190,6 +231,9 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
     /**
      * Perform a GET request against the MAL API and decode the JSON body.
      *
+     * Applies rate limiting (≈1 req/s), an in-memory cache keyed by URL, and an
+     * optional SSL-verification bypass.
+     *
      * @param string $url Absolute MAL API URL (already query-encoded).
      *
      * @return array<string, mixed>|null Decoded JSON object or null on
@@ -197,16 +241,30 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
      */
     private function httpGetJson(string $url): ?array
     {
-        $context = stream_context_create([
-            'http' => [
-                'method'        => 'GET',
-                'header'        => self::CLIENT_ID_HEADER . ': ' . $this->settings['client_id'] . "\r\n",
-                'timeout'       => self::HTTP_TIMEOUT_SEC,
-                'ignore_errors' => true,
-            ],
-        ]);
+        $cacheKey = md5($url);
+        if (isset($this->cache[$cacheKey])) {
+            return $this->cache[$cacheKey];
+        }
 
-        $body = @file_get_contents($url, false, $context);
+        $this->enforceRateLimit();
+
+        $httpOptions = [
+            'method'        => 'GET',
+            'header'        => self::CLIENT_ID_HEADER . ': ' . $this->settings['client_id'] . "\r\n"
+                . "Accept: application/json\r\n",
+            'timeout'       => self::HTTP_TIMEOUT_SEC,
+            'ignore_errors' => true,
+        ];
+
+        $contextOptions = ['http' => $httpOptions];
+        if (($this->settings['use_ssl_verification'] ?? true) === false) {
+            $contextOptions['ssl'] = [
+                'verify_peer'      => false,
+                'verify_peer_name' => false,
+            ];
+        }
+
+        $body = @file_get_contents($url, false, stream_context_create($contextOptions));
         if ($body === false) {
             return null;
         }
@@ -218,7 +276,24 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
         }
 
         /** @var array<string, mixed> $decoded */
+        $this->cache[$cacheKey] = $decoded;
+
         return $decoded;
+    }
+
+    /**
+     * Sleep, if necessary, so consecutive API requests stay below the rate limit.
+     *
+     * @return void
+     */
+    private function enforceRateLimit(): void
+    {
+        $elapsed = microtime(true) - $this->lastRequestTimestamp;
+        if ($elapsed < self::RATE_LIMIT_INTERVAL_SEC) {
+            usleep((int) ((self::RATE_LIMIT_INTERVAL_SEC - $elapsed) * 1_000_000));
+        }
+
+        $this->lastRequestTimestamp = microtime(true);
     }
 
     // -------------------------------------------------------------------------
@@ -384,6 +459,7 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
                 ? (int) $raw['num_scoring_users']
                 : null,
             'poster_url'     => $pictureLarge ?? $pictureMedium,
+            'fanart_url'     => $this->extractFanartUrl($raw),
             'episodes'       => isset($raw['num_episodes']) && is_numeric($raw['num_episodes'])
                 ? (int) $raw['num_episodes']
                 : null,
@@ -396,6 +472,37 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
                 ? (int) $raw['average_episode_duration']
                 : null,
         ];
+    }
+
+    /**
+     * Derive a fanart/backdrop URL from a MAL anime's additional `pictures`.
+     *
+     * MAL's `main_picture` is the poster; the `pictures` array carries extra
+     * artwork. We take the first entry (preferring its large size) as fanart.
+     *
+     * @param array<string, mixed> $raw Decoded anime-details JSON.
+     *
+     * @return string|null First additional picture URL, or null when absent.
+     */
+    private function extractFanartUrl(array $raw): ?string
+    {
+        if (!isset($raw['pictures']) || !is_array($raw['pictures']) || $raw['pictures'] === []) {
+            return null;
+        }
+
+        $first = $raw['pictures'][0] ?? null;
+        if (!is_array($first)) {
+            return null;
+        }
+
+        if (isset($first['large']) && is_string($first['large']) && $first['large'] !== '') {
+            return $first['large'];
+        }
+        if (isset($first['medium']) && is_string($first['medium']) && $first['medium'] !== '') {
+            return $first['medium'];
+        }
+
+        return null;
     }
 
     // -------------------------------------------------------------------------
@@ -491,7 +598,7 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
             'rating'        => $anime['rating'],
             'vote_count'    => $anime['vote_count'],
             'poster_url'    => $anime['poster_url'],
-            'fanart_url'    => null, // MAL provides no fanart/backdrop image
+            'fanart_url'    => $anime['fanart_url'] ?? null,
             'episodes'      => ($anime['episodes'] ?? 0) > 0 ? $anime['episodes'] : null,
             'type'          => $this->mapType($anime['media_type'] ?? null),
             'mal_id'        => $anime['id'],

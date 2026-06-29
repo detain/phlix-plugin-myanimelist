@@ -102,6 +102,14 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
     private float $lastRequestTimestamp = 0.0;
 
     /**
+     * Unix timestamp (with microseconds) before which no further request may be
+     * issued, set from a `Retry-After` header on a 429/503 response.
+     *
+     * 0.0 means no back-off is currently in effect.
+     */
+    private float $retryAfterUntil = 0.0;
+
+    /**
      * In-memory response cache: md5(url) => decoded JSON object.
      *
      * @var array<string, array<string, mixed>>
@@ -234,6 +242,13 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
      * Applies rate limiting (≈1 req/s), an in-memory cache keyed by URL, and an
      * optional SSL-verification bypass.
      *
+     * The HTTP status line is inspected before the body is trusted: only a
+     * 2xx response carrying a well-formed JSON object is decoded and cached.
+     * A 4xx/5xx error body (e.g. the JSON error MAL returns on a rejected
+     * Client ID or unknown anime) is never decoded-and-cached as if it were
+     * real data — it returns null. A 429/503 additionally records a back-off
+     * from the `Retry-After` header so the next call waits before retrying.
+     *
      * @param string $url Absolute MAL API URL (already query-encoded).
      *
      * @return array<string, mixed>|null Decoded JSON object or null on
@@ -253,6 +268,9 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
             'header'        => self::CLIENT_ID_HEADER . ': ' . $this->settings['client_id'] . "\r\n"
                 . "Accept: application/json\r\n",
             'timeout'       => self::HTTP_TIMEOUT_SEC,
+            // ignore_errors=true makes the stream wrapper return the error body
+            // (and populate $http_response_header) on 4xx/5xx rather than false,
+            // so the status can be inspected instead of swallowing the response.
             'ignore_errors' => true,
         ];
 
@@ -264,8 +282,56 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
             ];
         }
 
+        // $http_response_header is populated by the HTTP stream wrapper in the
+        // local scope after the call; null-init so a transport failure (where
+        // it is never set) is handled the same as an empty header set.
+        $http_response_header = null;
         $body = @file_get_contents($url, false, stream_context_create($contextOptions));
+
+        /** @var array<int, string>|null $http_response_header */
+        $headers = is_array($http_response_header) ? $http_response_header : [];
+
+        return $this->handleResponse($cacheKey, $body, $headers);
+    }
+
+    /**
+     * Apply the status-inspection, back-off and cache-only-on-2xx policy to a
+     * fetched response.
+     *
+     * Split out from {@see self::httpGetJson()} so the decode/cache decision is
+     * unit-testable by Reflection without issuing a real request. The body is
+     * trusted only when the status is 2xx and decodes to a JSON object; a
+     * transport failure (`$body === false`), an unparseable/non-2xx status, or
+     * a non-object body all return null and cache nothing. A 429/503 records a
+     * `Retry-After` back-off so the next call waits before retrying.
+     *
+     * @param string                  $cacheKey In-memory cache key (md5 of URL).
+     * @param string|false            $body     Raw response body, or false on
+     *                                           transport failure.
+     * @param array<int, string>      $headers  Raw response header lines for the
+     *                                           whole redirect chain, in order;
+     *                                           the FINAL status line gates the
+     *                                           body.
+     *
+     * @return array<string, mixed>|null Decoded JSON object on a cacheable 2xx,
+     *     null otherwise.
+     */
+    private function handleResponse(string $cacheKey, string|false $body, array $headers): ?array
+    {
         if ($body === false) {
+            return null;
+        }
+
+        $status = $this->parseHttpStatus($headers);
+
+        // Treat any non-2xx (or unparseable) status as failure: never decode
+        // or cache the error body. Record a back-off on 429/503 so the next
+        // request honours MAL's Retry-After before trying again.
+        if ($status === null || $status < 200 || $status >= 300) {
+            if ($status === 429 || $status === 503) {
+                $this->recordRetryAfter($headers);
+            }
+
             return null;
         }
 
@@ -282,13 +348,95 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
     }
 
     /**
-     * Sleep, if necessary, so consecutive API requests stay below the rate limit.
+     * Parse the numeric HTTP status code of the FINAL response from a
+     * stream-wrapper header set.
+     *
+     * PHP's HTTP stream wrapper follows redirects (`follow_location` is on by
+     * default) and `$http_response_header` ACCUMULATES the headers of every
+     * response in the redirect chain, in order. The first status line therefore
+     * belongs to an intermediate hop (e.g. a `301`/`302`), while the body that
+     * `file_get_contents()` returns is the payload of the FINAL response. So the
+     * status that gates the body is the LAST status line in the array, not the
+     * first — reading `$headers[0]` would misread a redirected `200` as a `3xx`
+     * and discard a perfectly valid response.
+     *
+     * The header array interleaves status lines (`HTTP/1.1 200 OK`) with field
+     * lines (`Content-Type: ...`); only entries that look like a status line are
+     * considered, and the last such entry wins. Returns the three-digit code, or
+     * null when the header set is empty or contains no recognisable status line
+     * (treated by the caller as a failure, never as a 200).
+     *
+     * @param array<int, string> $headers Raw response header lines for the whole
+     *     redirect chain, in order.
+     *
+     * @return int|null Numeric status code of the final response, or null when
+     *     none can be parsed.
+     */
+    private function parseHttpStatus(array $headers): ?int
+    {
+        $status = null;
+
+        // A status line is `HTTP/<major>[.<minor>] <3-digit-code> [reason]`.
+        // The optional reason phrase (and any trailing space) is irrelevant, so
+        // the pattern stops after the code. Iterate the whole accumulated set
+        // and let the LAST matching line win — that is the final response.
+        foreach ($headers as $line) {
+            if (preg_match('#^HTTP/\d(?:\.\d)?\s+(\d{3})#i', $line, $m) === 1) {
+                $status = (int) $m[1];
+            }
+        }
+
+        return $status;
+    }
+
+    /**
+     * Record a back-off window from a 429/503 response's `Retry-After` header.
+     *
+     * `Retry-After` may be given as a number of seconds; a missing or
+     * non-numeric value falls back to one rate-limit interval. The resulting
+     * absolute deadline is stored in {@see self::$retryAfterUntil}, which
+     * {@see self::enforceRateLimit()} waits out before the next request.
+     *
+     * @param array<int, string> $headers Raw response header lines.
+     *
+     * @return void
+     */
+    private function recordRetryAfter(array $headers): void
+    {
+        $delaySeconds = self::RATE_LIMIT_INTERVAL_SEC;
+
+        foreach ($headers as $line) {
+            if (preg_match('#^Retry-After:\s*(\d+)#i', $line, $m) === 1) {
+                $delaySeconds = (float) $m[1];
+                break;
+            }
+        }
+
+        $until = microtime(true) + $delaySeconds;
+        if ($until > $this->retryAfterUntil) {
+            $this->retryAfterUntil = $until;
+        }
+    }
+
+    /**
+     * Sleep, if necessary, so consecutive API requests stay below the rate
+     * limit and honour any recorded `Retry-After` back-off.
      *
      * @return void
      */
     private function enforceRateLimit(): void
     {
-        $elapsed = microtime(true) - $this->lastRequestTimestamp;
+        $now = microtime(true);
+
+        // Honour a 429/503 Retry-After back-off first: do not issue the next
+        // request until the recorded deadline has passed.
+        if ($this->retryAfterUntil > $now) {
+            usleep((int) (($this->retryAfterUntil - $now) * 1_000_000));
+            $this->retryAfterUntil = 0.0;
+            $now = microtime(true);
+        }
+
+        $elapsed = $now - $this->lastRequestTimestamp;
         if ($elapsed < self::RATE_LIMIT_INTERVAL_SEC) {
             usleep((int) ((self::RATE_LIMIT_INTERVAL_SEC - $elapsed) * 1_000_000));
         }

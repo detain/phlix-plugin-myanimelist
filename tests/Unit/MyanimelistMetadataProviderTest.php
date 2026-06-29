@@ -180,6 +180,192 @@ final class MyanimelistMetadataProviderTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+    // scoreSearchResults (B1: scored matching using alternative_titles)
+    // -------------------------------------------------------------------------
+
+    /**
+     * When the query exactly matches an alternative title (not the main title),
+     * that result must be selected even if it is not the first in MAL's ranking.
+     */
+    public function test_exact_match_on_alternative_title_is_found(): void
+    {
+        // Node 10087 has "Fate/Zero (TV)" as main title (prefix match, not exact).
+        // Node 1210 has "Fate/Zero" as a synonym (exact match on synonym).
+        // The query "Fate/Zero" should find the exact match on node 1210's synonym
+        // even though node 10087 appears first and would also match (prefix).
+        $json = '{"data":['
+            . '{"node":{"id":10087,"title":"Fate/Zero (TV)","alternative_titles":{"synonyms":[]}}},'
+            . '{"node":{"id":1210,"title":"Fate/stay night","alternative_titles":{"synonyms":["Fate/Zero","F/SN"]}}}'
+            . ']}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'Fate/Zero']);
+
+        $this->assertSame(1210, $result);
+    }
+
+    /**
+     * Exact match on the main title returns immediately without scoring others.
+     */
+    public function test_exact_match_on_main_title_returns_immediately(): void
+    {
+        $json = '{"data":['
+            . '{"node":{"id":11,"title":"One Piece","alternative_titles":{"synonyms":[]}}},'
+            . '{"node":{"id":21,"title":"One Punch Man","alternative_titles":{"synonyms":[]}}}'
+            . ']}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'One Piece']);
+
+        $this->assertSame(11, $result);
+    }
+
+    /**
+     * Prefix matching: a longer matching prefix scores higher than a shorter one.
+     * "Fate/stay night" (prefix 14 chars) should beat "Fate/stay" (prefix 9 chars).
+     */
+    public function test_prefix_match_longer_prefix_wins(): void
+    {
+        $json = '{"data":['
+            . '{"node":{"id":1,"title":"Fate/stay night","alternative_titles":{"synonyms":[]}}},'
+            . '{"node":{"id":2,"title":"Fate/stay","alternative_titles":{"synonyms":[]}}}'
+            . ']}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'Fate/stay night']);
+
+        $this->assertSame(1, $result);
+    }
+
+    /**
+     * Prefix scoring formula: 800 - |query_len - title_len|
+     * Query "One Piece" (8 chars) vs "One Piece manga" (16 chars): 800 - 8 = 792
+     * Query "One Piece" (8 chars) vs "One Piece" (8 chars): 800 - 0 = 800  (exact)
+     * Query "One Piece" (8 chars) vs "One Piece TV" (13 chars): 800 - 5 = 795
+     */
+    public function test_prefix_scoring_formula(): void
+    {
+        $json = '{"data":['
+            . '{"node":{"id":1,"title":"One Piece TV","alternative_titles":{"synonyms":[]}}},'
+            . '{"node":{"id":2,"title":"One Piece anime","alternative_titles":{"synonyms":[]}}},'
+            . '{"node":{"id":3,"title":"One Piece","alternative_titles":{"synonyms":[]}}}'
+            . ']}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'One Piece']);
+
+        // Exact match (id 3) returns immediately with highest confidence
+        $this->assertSame(3, $result);
+    }
+
+    /**
+     * Contains matching: the query appears somewhere inside the title.
+     * Score = 600 - |query_len - title_len|
+     * Query "Piece" (5 chars) in "One Piece anime adaptation" (23 chars): 600 - 18 = 582
+     * Query "Piece" (5 chars) in "Dragon Piece" (11 chars): 600 - 6 = 594
+     * The closer length match (id 2, 11 vs 23 chars) wins with 594 vs 582.
+     */
+    public function test_contains_match_favors_closer_length_match(): void
+    {
+        $json = '{"data":['
+            . '{"node":{"id":1,"title":"One Piece anime adaptation","alternative_titles":{"synonyms":[]}}},'
+            . '{"node":{"id":2,"title":"Dragon Piece","alternative_titles":{"synonyms":[]}}}'
+            . ']}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'Piece']);
+
+        // id 2 wins: 600 - |5-11| = 594 vs id 1: 600 - |5-23| = 582
+        $this->assertSame(2, $result);
+    }
+
+    /**
+     * Alternative titles include English, Japanese, and synonyms.
+     * The query may match the Japanese title when the main title is in English.
+     */
+    public function test_matches_japanese_alternative_title(): void
+    {
+        $json = '{"data":['
+            . '{"node":{"id":1,"title":"Cowboy Bebop","alternative_titles":'
+            . '{"en":"Cowboy Bebop","ja":"カウボーイビバップ","synonyms":["CB"]}}},'
+            . '{"node":{"id":2,"title":"Something Else","alternative_titles":'
+            . '{"synonyms":[]}}}'
+            . ']}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'カウボーイビバップ']);
+
+        $this->assertSame(1, $result);
+    }
+
+    /**
+     * When no candidate has any title matching the query, null is returned.
+     */
+    public function test_no_match_returns_null(): void
+    {
+        $json = '{"data":['
+            . '{"node":{"id":1,"title":"Unrelated Title","alternative_titles":{"synonyms":[]}}}'
+            . ']}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'xyz no match']);
+
+        $this->assertNull($result);
+    }
+
+    /**
+     * Case-insensitive matching: "one piece" matches "One Piece".
+     */
+    public function test_exact_match_is_case_insensitive(): void
+    {
+        $json = '{"data":['
+            . '{"node":{"id":1,"title":"One Piece","alternative_titles":{"synonyms":[]}}}'
+            . ']}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'ONE PIECE']);
+
+        $this->assertSame(1, $result);
+    }
+
+    /**
+     * Empty data array returns null.
+     */
+    public function test_score_search_results_returns_null_for_empty_data(): void
+    {
+        $decoded = ['data' => []];
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'Any Query']);
+
+        $this->assertNull($result);
+    }
+
+    /**
+     * Node without alternative_titles key is handled gracefully.
+     */
+    public function test_node_without_alternative_titles_handled_gracefully(): void
+    {
+        $json = '{"data":['
+            . '{"node":{"id":1,"title":"Solo Leveling"}},'
+            . '{"node":{"id":2,"title":"Other Anime","alternative_titles":{"synonyms":["Solo"]}}}'
+            . ']}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'Solo Leveling']);
+
+        $this->assertSame(1, $result);
+    }
+
+    // -------------------------------------------------------------------------
     // parseAnimeResponse
     // -------------------------------------------------------------------------
 

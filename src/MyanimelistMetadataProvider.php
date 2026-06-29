@@ -544,21 +544,30 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     /**
      * Internal: find a MAL anime ID by title via the search endpoint.
      *
+     * Uses scored matching against all available titles (main + English +
+     * Japanese + synonyms) to select the best candidate, rather than blindly
+     * returning the first MAL search result.
+     *
+     * Scoring algorithm (per anidb B4):
+     * - Exact match (case-insensitive): return immediately (highest confidence)
+     * - Prefix match (query starts title): score = 800 - |query_len - title_len|
+     * - Contains match (query inside title): score = 600 - |query_len - title_len|
+     *
      * @param string $title Anime title to search for.
      *
-     * @return int|null MAL anime ID of the first result, or null if none.
+     * @return int|null Best-scoring MAL anime ID, or null if no match found.
      */
     private function findIdByTitleInternal(string $title): ?int
     {
         $url = self::API_BASE . '/anime?q=' . rawurlencode($title)
-            . '&limit=' . self::SEARCH_LIMIT;
+            . '&limit=' . self::SEARCH_LIMIT . '&fields=id,title,alternative_titles';
 
         $response = $this->httpGetJson($url);
         if ($response === null) {
             return null;
         }
 
-        return $this->parseSearchResponse($response);
+        return $this->scoreSearchResults($response, $title);
     }
 
     /**
@@ -588,6 +597,135 @@ class MyanimelistMetadataProvider implements LifecycleInterface
         }
 
         return (int) $node['id'];
+    }
+
+    /**
+     * Score each search result against all its titles and return the best match.
+     *
+     * MAL search returns results ranked by popularity, which may not correspond
+     * to the user's intent when querying by a subtitle, short name, or
+     * alternative title. This method evaluates every candidate across all of its
+     * available titles (main, English, Japanese, synonyms) using the anidb B4
+     * scoring algorithm:
+     *
+     * - Exact match (case-insensitive): return immediately (highest confidence)
+     * - Prefix match (query starts title): score = 800 - |query_len - title_len|
+     * - Contains match (query inside title): score = 600 - |query_len - title_len|
+     *
+     * Response shape: `{ "data": [ { "node": { "id", "title", "alternative_titles": {en, ja, synonyms} } }, ... ] }`.
+     *
+     * @param array<string, mixed> $response Decoded search JSON from MAL.
+     * @param string              $query    Original search query (user intent).
+     *
+     * @return int|null Highest-scoring MAL ID, or null when no candidate matches.
+     */
+    private function scoreSearchResults(array $response, string $query): ?int
+    {
+        $data = $response['data'] ?? null;
+        if (!is_array($data) || $data === []) {
+            return null;
+        }
+
+        $queryLower = mb_strtolower($query, 'UTF-8');
+        $queryLen = mb_strlen($queryLower, 'UTF-8');
+
+        $bestId = null;
+        $bestScore = -1;
+
+        foreach ($data as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+
+            $node = $entry['node'] ?? null;
+            if (!is_array($node) || !isset($node['id'])) {
+                continue;
+            }
+
+            $id = (int) $node['id'];
+
+            // Collect all titles for this candidate
+            $titles = [];
+
+            // Main title
+            if (isset($node['title']) && is_string($node['title']) && $node['title'] !== '') {
+                $titles[] = $node['title'];
+            }
+
+            // Alternative titles
+            $altTitles = is_array($node['alternative_titles'] ?? null) ? $node['alternative_titles'] : [];
+            if (isset($altTitles['en']) && is_string($altTitles['en']) && $altTitles['en'] !== '') {
+                $titles[] = $altTitles['en'];
+            }
+            if (isset($altTitles['ja']) && is_string($altTitles['ja']) && $altTitles['ja'] !== '') {
+                $titles[] = $altTitles['ja'];
+            }
+            if (isset($altTitles['synonyms']) && is_array($altTitles['synonyms'])) {
+                foreach ($altTitles['synonyms'] as $synonym) {
+                    if (is_string($synonym) && $synonym !== '') {
+                        $titles[] = $synonym;
+                    }
+                }
+            }
+
+            // Score this candidate's titles
+            $candidateScore = $this->scoreCandidateTitles($titles, $queryLower, $queryLen);
+
+            if ($candidateScore === -1) {
+                // Exact match found — return immediately
+                return $id;
+            }
+
+            if ($candidateScore > $bestScore) {
+                $bestScore = $candidateScore;
+                $bestId = $id;
+            }
+        }
+
+        return $bestScore > 0 ? $bestId : null;
+    }
+
+    /**
+     * Score a single candidate's titles against the query.
+     *
+     * @param array<int, string> $titles      All titles for this candidate.
+     * @param string             $queryLower  Lowercased query string.
+     * @param int                $queryLen    Length of the lowercased query.
+     *
+     * @return int -1 on exact match (signal to stop searching), >0 score
+     *     for prefix/contains matches, 0 when no match.
+     */
+    private function scoreCandidateTitles(array $titles, string $queryLower, int $queryLen): int
+    {
+        $bestScore = 0;
+
+        foreach ($titles as $title) {
+            $titleLower = mb_strtolower($title, 'UTF-8');
+            $titleLen = mb_strlen($titleLower, 'UTF-8');
+
+            // Exact match (case-insensitive) — checked FIRST, before prefix
+            if ($titleLower === $queryLower) {
+                return -1;
+            }
+
+            // Prefix match: query starts the title
+            if (str_starts_with($titleLower, $queryLower)) {
+                $score = 800 - abs($queryLen - $titleLen);
+                if ($score > $bestScore) {
+                    $bestScore = $score;
+                }
+            }
+
+            // Contains match: query inside title
+            if (str_contains($titleLower, $queryLower)) {
+                $score = 600 - abs($queryLen - $titleLen);
+                if ($score > $bestScore) {
+                    $bestScore = $score;
+                }
+            }
+        }
+
+        return $bestScore;
     }
 
     // -------------------------------------------------------------------------

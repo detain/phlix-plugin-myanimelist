@@ -39,6 +39,18 @@ final class MyanimelistMetadataProviderTest extends TestCase
         return $reflectionMethod->invokeArgs($provider, $args);
     }
 
+    /**
+     * Read a private property from the provider via Reflection.
+     */
+    private function readPrivate(MyanimelistMetadataProvider $provider, string $property): mixed
+    {
+        $reflection = new \ReflectionClass($provider);
+        $reflectionProperty = $reflection->getProperty($property);
+        $reflectionProperty->setAccessible(true);
+
+        return $reflectionProperty->getValue($provider);
+    }
+
     // -------------------------------------------------------------------------
     // Lifecycle
     // -------------------------------------------------------------------------
@@ -481,6 +493,222 @@ final class MyanimelistMetadataProviderTest extends TestCase
             'negative'   => [-5, null],
             'null'       => [null, null],
         ];
+    }
+
+    // -------------------------------------------------------------------------
+    // B5: HTTP status inspection — never cache/return error bodies as data
+    // -------------------------------------------------------------------------
+
+    /**
+     * parseHttpStatus() pulls the numeric code from a stream-wrapper status line.
+     *
+     * @dataProvider httpStatusProvider
+     *
+     * @param array<int, string> $headers
+     */
+    public function test_parse_http_status_extracts_code(array $headers, ?int $expected): void
+    {
+        $result = $this->invokePrivate($this->makeProvider(), 'parseHttpStatus', [$headers]);
+
+        $this->assertSame($expected, $result);
+    }
+
+    /**
+     * @return array<string, array{array<int, string>, int|null}>
+     */
+    public static function httpStatusProvider(): array
+    {
+        return [
+            '200 OK'                  => [['HTTP/1.1 200 OK'], 200],
+            '401 Unauthorized'        => [['HTTP/1.1 401 Unauthorized'], 401],
+            '403 Forbidden'           => [['HTTP/1.1 403 Forbidden'], 403],
+            '404 Not Found'           => [['HTTP/1.1 404 Not Found'], 404],
+            '429 Too Many Requests'   => [['HTTP/1.1 429 Too Many Requests'], 429],
+            '503 Service Unavailable' => [['HTTP/1.1 503 Service Unavailable'], 503],
+            'HTTP/2 form'             => [['HTTP/2 200'], 200],
+            'no reason phrase'        => [['HTTP/1.1 204'], 204],
+            'empty header set'        => [[], null],
+            'garbage status line'     => [['not a status line'], null],
+        ];
+    }
+
+    public function test_handle_response_caches_and_returns_on_2xx(): void
+    {
+        $provider = $this->makeProvider();
+        $body = '{"data":[{"node":{"id":21}}]}';
+
+        /** @var array<string, mixed>|null $result */
+        $result = $this->invokePrivate(
+            $provider,
+            'handleResponse',
+            ['ckey', $body, ['HTTP/1.1 200 OK']]
+        );
+
+        $this->assertIsArray($result);
+        $this->assertSame([['node' => ['id' => 21]]], $result['data']);
+
+        /** @var array<string, mixed> $cache */
+        $cache = $this->readPrivate($provider, 'cache');
+        $this->assertArrayHasKey('ckey', $cache);
+        $this->assertSame($result, $cache['ckey']);
+    }
+
+    /**
+     * 401/403/404 error JSON must return null AND never enter the cache.
+     *
+     * @dataProvider errorStatusProvider
+     */
+    public function test_handle_response_drops_error_status_without_caching(int $status, string $reason): void
+    {
+        $provider = $this->makeProvider();
+        // A perfectly well-formed JSON *object* that would pass is_array():
+        // the point of B5 is that the status, not the body shape, gates caching.
+        $errorBody = '{"error":"invalid_token","message":"Bad client id"}';
+        $statusLine = 'HTTP/1.1 ' . $status . ' ' . $reason;
+
+        $result = $this->invokePrivate(
+            $provider,
+            'handleResponse',
+            ['ckey', $errorBody, [$statusLine]]
+        );
+
+        $this->assertNull($result);
+
+        /** @var array<string, mixed> $cache */
+        $cache = $this->readPrivate($provider, 'cache');
+        $this->assertArrayNotHasKey('ckey', $cache);
+        $this->assertSame([], $cache);
+    }
+
+    /**
+     * @return array<string, array{int, string}>
+     */
+    public static function errorStatusProvider(): array
+    {
+        return [
+            '401' => [401, 'Unauthorized'],
+            '403' => [403, 'Forbidden'],
+            '404' => [404, 'Not Found'],
+            '500' => [500, 'Internal Server Error'],
+        ];
+    }
+
+    public function test_handle_response_returns_null_on_transport_failure(): void
+    {
+        $provider = $this->makeProvider();
+
+        $result = $this->invokePrivate($provider, 'handleResponse', ['ckey', false, []]);
+
+        $this->assertNull($result);
+        $this->assertSame([], $this->readPrivate($provider, 'cache'));
+    }
+
+    public function test_handle_response_returns_null_on_2xx_with_non_object_body(): void
+    {
+        $provider = $this->makeProvider();
+
+        // 2xx but the body is not a JSON object (e.g. truncated/garbage).
+        $result = $this->invokePrivate(
+            $provider,
+            'handleResponse',
+            ['ckey', 'not json', ['HTTP/1.1 200 OK']]
+        );
+
+        $this->assertNull($result);
+        $this->assertSame([], $this->readPrivate($provider, 'cache'));
+    }
+
+    public function test_handle_response_429_records_back_off_from_retry_after(): void
+    {
+        $provider = $this->makeProvider();
+        $before = microtime(true);
+
+        $result = $this->invokePrivate(
+            $provider,
+            'handleResponse',
+            ['ckey', '{"error":"too_many"}', ['HTTP/1.1 429 Too Many Requests', 'Retry-After: 30']]
+        );
+
+        $this->assertNull($result);
+        $this->assertSame([], $this->readPrivate($provider, 'cache'), '429 body must not be cached');
+
+        /** @var float $until */
+        $until = $this->readPrivate($provider, 'retryAfterUntil');
+        // A 30s Retry-After should push the deadline ~30s into the future.
+        $this->assertGreaterThanOrEqual($before + 29.0, $until);
+        $this->assertLessThanOrEqual($before + 31.0, $until);
+    }
+
+    public function test_handle_response_503_records_back_off(): void
+    {
+        $provider = $this->makeProvider();
+        $before = microtime(true);
+
+        $this->invokePrivate(
+            $provider,
+            'handleResponse',
+            ['ckey', '{"error":"unavailable"}', ['HTTP/1.1 503 Service Unavailable', 'Retry-After: 5']]
+        );
+
+        /** @var float $until */
+        $until = $this->readPrivate($provider, 'retryAfterUntil');
+        $this->assertGreaterThanOrEqual($before + 4.0, $until);
+        $this->assertLessThanOrEqual($before + 6.0, $until);
+    }
+
+    public function test_record_retry_after_falls_back_to_interval_without_header(): void
+    {
+        $provider = $this->makeProvider();
+        $before = microtime(true);
+
+        // 429 with no Retry-After header: back-off falls back to the rate-limit interval.
+        $this->invokePrivate(
+            $provider,
+            'handleResponse',
+            ['ckey', '{"error":"too_many"}', ['HTTP/1.1 429 Too Many Requests']]
+        );
+
+        /** @var float $until */
+        $until = $this->readPrivate($provider, 'retryAfterUntil');
+        $this->assertGreaterThan($before, $until);
+        // RATE_LIMIT_INTERVAL_SEC is 1.0; allow generous slack.
+        $this->assertLessThanOrEqual($before + 2.0, $until);
+    }
+
+    public function test_2xx_without_back_off_leaves_retry_after_untouched(): void
+    {
+        $provider = $this->makeProvider();
+
+        $this->invokePrivate(
+            $provider,
+            'handleResponse',
+            ['ckey', '{"data":[]}', ['HTTP/1.1 200 OK', 'Retry-After: 999']]
+        );
+
+        // Retry-After on a 2xx is irrelevant: no back-off should be recorded.
+        $this->assertSame(0.0, $this->readPrivate($provider, 'retryAfterUntil'));
+    }
+
+    public function test_enforce_rate_limit_waits_out_recorded_back_off(): void
+    {
+        $provider = $this->makeProvider();
+
+        // Record a short back-off via Reflection, then assert enforceRateLimit
+        // sleeps it out and clears the deadline.
+        $reflection = new \ReflectionClass($provider);
+        $prop = $reflection->getProperty('retryAfterUntil');
+        $prop->setAccessible(true);
+        $deadline = microtime(true) + 0.15;
+        $prop->setValue($provider, $deadline);
+
+        $start = microtime(true);
+        $this->invokePrivate($provider, 'enforceRateLimit', []);
+        $elapsed = microtime(true) - $start;
+
+        // It should have blocked until at least the deadline.
+        $this->assertGreaterThanOrEqual(0.14, $elapsed);
+        // And cleared the back-off so it is not re-applied next call.
+        $this->assertSame(0.0, $prop->getValue($provider));
     }
 
     // -------------------------------------------------------------------------

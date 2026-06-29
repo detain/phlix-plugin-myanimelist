@@ -22,7 +22,21 @@ final class MyanimelistMetadataProviderTest extends TestCase
      */
     private function makeProvider(): MyanimelistMetadataProvider
     {
-        return new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        // Inject a fake timerSleep that uses usleep (blocking) instead of
+        // Workerman\Timer::sleep() so the test can run without the workerman library.
+        $reflection = new \ReflectionClass($provider);
+        $prop = $reflection->getProperty('timerSleep');
+        $prop->setAccessible(true);
+        $prop->setValue(
+            $provider,
+            static function (float $seconds): void {
+                usleep((int) ($seconds * 1_000_000));
+            }
+        );
+
+        return $provider;
     }
 
     /**

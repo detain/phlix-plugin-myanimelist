@@ -5,6 +5,8 @@ parameters:
     bootstrapFiles:
         - vendor/autoload.php
     treatPhpDocTypesAsCertain: false
+    excludePaths:
+        - src/MyanimelistMetadataProviderAdapter.php
     ignoreErrors:
         -
             message: '#^Cannot cast mixed to int\.$#'

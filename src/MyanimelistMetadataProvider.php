@@ -159,9 +159,11 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     /**
      * Called by the loader once when the plugin is enabled.
      *
-     * Stashes the host container and performs a lightweight connectivity +
+     * Stashes the host container, performs a lightweight connectivity +
      * credential check (a one-result search) so a bad Client ID or unreachable
-     * MAL surfaces immediately rather than on the first library scan.
+     * MAL surfaces immediately rather than on the first library scan, and
+     * registers an adapter with the host MetadataManager so the server's
+     * metadata pipeline can actually consume MAL results.
      *
      * @param ContainerInterface $container Host PSR-11 container.
      *
@@ -182,6 +184,89 @@ class MyanimelistMetadataProvider implements LifecycleInterface
                 . ' Check your Client ID and network connectivity.'
             );
         }
+
+        $this->registerWithMetadataManager($container);
+    }
+
+    /**
+     * Resolve the host MetadataManager from the container and register an
+     * adapter of this provider against it for the anime media type.
+     *
+     * The registration is best-effort: if the host does not expose a
+     * MetadataManager (e.g. a stripped CLI bootstrap) we log nothing and move
+     * on — onEnable() must not abort the whole plugin just because the registry
+     * is unavailable.
+     *
+     * @param ContainerInterface $container Host PSR-11 container.
+     *
+     * @return void
+     */
+    private function registerWithMetadataManager(ContainerInterface $container): void
+    {
+        $managerClass = 'Phlix\\Media\\Metadata\\MetadataManager';
+
+        if (!$container->has($managerClass)) {
+            return;
+        }
+
+        $manager = $container->get($managerClass);
+        if (!is_object($manager) || !method_exists($manager, 'registerProvider')) {
+            return;
+        }
+
+        $adapter = new MyanimelistMetadataProviderAdapter($this);
+        $manager->registerProvider(
+            MyanimelistMetadataProviderAdapter::SOURCE_NAME,
+            $adapter,
+            ['anime'],
+        );
+    }
+
+    /**
+     * Public bridge: find a MAL anime ID by title via the search endpoint.
+     *
+     * Thin, host-facing wrapper over the internal search path. Consumed by
+     * {@see MyanimelistMetadataProviderAdapter::search()}.
+     *
+     * @param string $title Anime title to search for.
+     *
+     * @return int|null MAL anime ID of the first result, or null if none.
+     */
+    public function findIdByTitle(string $title): ?int
+    {
+        $trimmed = trim($title);
+        if ($trimmed === '') {
+            return null;
+        }
+
+        // Use the existing private implementation
+        return $this->findIdByTitleInternal($trimmed);
+    }
+
+    /**
+     * Public bridge: fetch full, host-shaped metadata for a MAL anime ID.
+     *
+     * Thin, host-facing wrapper over {@see fetchAnimeDetails()} +
+     * {@see mapToMetadataReturn()}. Consumed by
+     * {@see MyanimelistMetadataProviderAdapter::getDetails()} /
+     * {@see MyanimelistMetadataProviderAdapter::getImages()}.
+     *
+     * @param int $malId MAL anime ID.
+     *
+     * @return array<string, mixed> Mapped metadata array, or `[]` when not found.
+     */
+    public function fetchAnimeMetadata(int $malId): array
+    {
+        if ($malId <= 0) {
+            return [];
+        }
+
+        $anime = $this->fetchAnimeDetails($malId);
+        if ($anime === null) {
+            return [];
+        }
+
+        return $this->mapToMetadataReturn($anime);
     }
 
     /**
@@ -247,7 +332,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface
         }
 
         // Step 2: Find MAL ID via the search endpoint
-        $malId = $this->findIdByTitle($animeName);
+        $malId = $this->findIdByTitleInternal($animeName);
         if ($malId === null) {
             return [];
         }
@@ -457,13 +542,13 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     // -------------------------------------------------------------------------
 
     /**
-     * Find a MAL anime ID by title via the search endpoint.
+     * Internal: find a MAL anime ID by title via the search endpoint.
      *
      * @param string $title Anime title to search for.
      *
      * @return int|null MAL anime ID of the first result, or null if none.
      */
-    private function findIdByTitle(string $title): ?int
+    private function findIdByTitleInternal(string $title): ?int
     {
         $url = self::API_BASE . '/anime?q=' . rawurlencode($title)
             . '&limit=' . self::SEARCH_LIMIT;

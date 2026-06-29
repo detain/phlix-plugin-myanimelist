@@ -6,6 +6,11 @@ namespace Phlix\Myanimelist;
 
 use Phlix\Shared\Plugin\LifecycleInterface;
 use Psr\Container\ContainerInterface;
+use Workerman\Coroutine;
+use Workerman\Coroutine\Coroutine\Fiber as CoroutineFiber;
+use Workerman\Http\Client;
+use Workerman\Http\Response;
+use Workerman\Timer;
 
 /**
  * MyAnimeList (MAL) metadata provider plugin for Phlix.
@@ -117,6 +122,18 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     private array $cache = [];
 
     /**
+     * Clock used for time measurements in rate limiting.
+     *
+     * @var \Closure(): float
+     */
+    private \Closure $clock;
+
+    /**
+     * Shared HTTP client instance for connection pooling.
+     */
+    private ?Client $httpClient = null;
+
+    /**
      * @param array{client_id: string, use_ssl_verification?: bool} $settings
      *     Plugin settings from plugin.json. client_id is the MyAnimeList API
      *     client ID, sent as the X-MAL-CLIENT-ID header on every request.
@@ -125,6 +142,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     public function __construct(array $settings)
     {
         $this->settings = $settings;
+        $this->clock = static fn(): float => microtime(true);
     }
 
     /**
@@ -250,6 +268,11 @@ class MyanimelistMetadataProvider implements LifecycleInterface
      * real data — it returns null. A 429/503 additionally records a back-off
      * from the `Retry-After` header so the next call waits before retrying.
      *
+     * Uses Workerman's Fiber-based async HTTP via workerman/http-client. The
+     * HTTP request is issued non-blockingly and the Fiber suspends until the
+     * response arrives, allowing the Workerman event loop to handle other
+     * requests during the wait.
+     *
      * @param string $url Absolute MAL API URL (already query-encoded).
      *
      * @return array<string, mixed>|null Decoded JSON object or null on
@@ -264,35 +287,54 @@ class MyanimelistMetadataProvider implements LifecycleInterface
 
         $this->enforceRateLimit();
 
-        $httpOptions = [
-            'method'        => 'GET',
-            'header'        => self::CLIENT_ID_HEADER . ': ' . $this->settings['client_id'] . "\r\n"
-                . "Accept: application/json\r\n",
-            'timeout'       => self::HTTP_TIMEOUT_SEC,
-            // ignore_errors=true makes the stream wrapper return the error body
-            // (and populate $http_response_header) on 4xx/5xx rather than false,
-            // so the status can be inspected instead of swallowing the response.
-            'ignore_errors' => true,
-        ];
+        return $this->requestAsync($url, $cacheKey);
+    }
 
-        $contextOptions = ['http' => $httpOptions];
-        if (($this->settings['use_ssl_verification'] ?? true) === false) {
-            $contextOptions['ssl'] = [
-                'verify_peer'      => false,
-                'verify_peer_name' => false,
+    /**
+     * Issue an async HTTP GET and return the decoded JSON response.
+     *
+     * Runs inside a Fiber so that the HTTP request suspends the current
+     * context (not the worker) while waiting for the response, allowing the
+     * Workerman event loop to service other tasks.
+     *
+     * @param string $url        Full URL to request.
+     * @param string $cacheKey   Pre-computed cache key (md5 of URL).
+     *
+     * @return array<string, mixed>|null Decoded JSON or null on failure.
+     */
+    private function requestAsync(string $url, string $cacheKey): ?array
+    {
+        $fiber = new CoroutineFiber(function () use ($url, $cacheKey): ?array {
+            $client = $this->getHttpClient();
+
+            $headers = [
+                self::CLIENT_ID_HEADER . ': ' . $this->settings['client_id'],
+                'Accept: application/json',
             ];
-        }
 
-        // $http_response_header is populated by the HTTP stream wrapper in the
-        // local scope after the call; null-init so a transport failure (where
-        // it is never set) is handled the same as an empty header set.
-        $http_response_header = null;
-        $body = @file_get_contents($url, false, stream_context_create($contextOptions));
+            $options = [
+                'headers' => $headers,
+                'timeout' => self::HTTP_TIMEOUT_SEC,
+            ];
 
-        /** @var array<int, string>|null $http_response_header */
-        $headers = is_array($http_response_header) ? $http_response_header : [];
+            if (($this->settings['use_ssl_verification'] ?? true) === false) {
+                $options['verify_ssl'] = false;
+            }
 
-        return $this->handleResponse($cacheKey, $body, $headers);
+            try {
+                /** @var mixed $rawResponse */
+                $rawResponse = $client->request($url, $options);
+                if (!$rawResponse instanceof Response) {
+                    return null;
+                }
+
+                return $this->handleResponseObject($cacheKey, $rawResponse);
+            } catch (\Throwable) {
+                return null;
+            }
+        });
+
+        return $fiber->start();
     }
 
     /**
@@ -346,6 +388,58 @@ class MyanimelistMetadataProvider implements LifecycleInterface
         $this->cache[$cacheKey] = $decoded;
 
         return $decoded;
+    }
+
+    /**
+     * Apply the status-inspection, back-off and cache-only-on-2xx policy to a
+     * Workerman HTTP Response object.
+     *
+     * This is the async-HTTP counterpart to {@see self::handleResponse()}. It
+     * reads the status code directly from the Response object and extracts the
+     * body string for JSON decoding. Retains all B5 semantics (429/503 back-off,
+     * non-2xx → null, JSON object cache validation).
+     *
+     * @param string    $cacheKey  In-memory cache key (md5 of URL).
+     * @param Response  $response  Workerman HTTP Response object.
+     *
+     * @return array<string, mixed>|null Decoded JSON object on a cacheable 2xx,
+     *     null otherwise.
+     */
+    private function handleResponseObject(string $cacheKey, Response $response): ?array
+    {
+        $status = $response->getStatusCode();
+
+        // Treat any non-2xx status as failure: never decode or cache the error
+        // body. Record a back-off on 429/503 so the next request honours MAL's
+        // Retry-After before trying again.
+        if ($status < 200 || $status >= 300) {
+            if ($status === 429 || $status === 503) {
+                $this->recordRetryAfterFromResponse($response);
+            }
+
+            return null;
+        }
+
+        $body = $response->getBody()->getContents();
+
+        /** @var mixed $decoded */
+        $decoded = json_decode($body, true);
+        if (!is_array($decoded)) {
+            return null;
+        }
+
+        /** @var array<string, mixed> $decoded */
+        $this->cache[$cacheKey] = $decoded;
+
+        return $decoded;
+    }
+
+    /**
+     * Get or create the shared HTTP client instance.
+     */
+    private function getHttpClient(): Client
+    {
+        return $this->httpClient ??= new Client();
     }
 
     /**
@@ -413,7 +507,30 @@ class MyanimelistMetadataProvider implements LifecycleInterface
             }
         }
 
-        $until = microtime(true) + $delaySeconds;
+        $until = ($this->clock)() + $delaySeconds;
+        if ($until > $this->retryAfterUntil) {
+            $this->retryAfterUntil = $until;
+        }
+    }
+
+    /**
+     * Record a back-off window from a 429/503 response's Retry-After header
+     * (extracted from a Workerman Response object).
+     *
+     * @param Response $response Workerman HTTP Response object.
+     *
+     * @return void
+     */
+    private function recordRetryAfterFromResponse(Response $response): void
+    {
+        $delaySeconds = self::RATE_LIMIT_INTERVAL_SEC;
+
+        $retryAfter = $response->getHeaderLine('Retry-After');
+        if ($retryAfter !== '' && is_numeric($retryAfter)) {
+            $delaySeconds = (float) $retryAfter;
+        }
+
+        $until = ($this->clock)() + $delaySeconds;
         if ($until > $this->retryAfterUntil) {
             $this->retryAfterUntil = $until;
         }
@@ -423,26 +540,29 @@ class MyanimelistMetadataProvider implements LifecycleInterface
      * Sleep, if necessary, so consecutive API requests stay below the rate
      * limit and honour any recorded `Retry-After` back-off.
      *
+     * Uses Workerman's Timer::sleep() which yields to the event loop rather
+     * than blocking the worker (when a Fiber-based loop is active).
+     *
      * @return void
      */
     private function enforceRateLimit(): void
     {
-        $now = microtime(true);
+        $now = ($this->clock)();
 
         // Honour a 429/503 Retry-After back-off first: do not issue the next
         // request until the recorded deadline has passed.
         if ($this->retryAfterUntil > $now) {
-            usleep((int) (($this->retryAfterUntil - $now) * 1_000_000));
+            Timer::sleep($this->retryAfterUntil - $now);
             $this->retryAfterUntil = 0.0;
-            $now = microtime(true);
+            $now = ($this->clock)();
         }
 
         $elapsed = $now - $this->lastRequestTimestamp;
         if ($elapsed < self::RATE_LIMIT_INTERVAL_SEC) {
-            usleep((int) ((self::RATE_LIMIT_INTERVAL_SEC - $elapsed) * 1_000_000));
+            Timer::sleep(self::RATE_LIMIT_INTERVAL_SEC - $elapsed);
         }
 
-        $this->lastRequestTimestamp = microtime(true);
+        $this->lastRequestTimestamp = ($this->clock)();
     }
 
     // -------------------------------------------------------------------------

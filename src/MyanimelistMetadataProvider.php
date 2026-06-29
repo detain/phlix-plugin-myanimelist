@@ -300,9 +300,9 @@ class MyanimelistMetadataProvider implements LifecycleInterface
      * @param string $url        Full URL to request.
      * @param string $cacheKey   Pre-computed cache key (md5 of URL).
      *
-     * @return array<string, mixed>|null Decoded JSON or null on failure.
+     * @return mixed Decoded JSON or null on failure.
      */
-    private function requestAsync(string $url, string $cacheKey): ?array
+    private function requestAsync(string $url, string $cacheKey): mixed
     {
         $fiber = new CoroutineFiber(function () use ($url, $cacheKey): ?array {
             $client = $this->getHttpClient();
@@ -335,59 +335,6 @@ class MyanimelistMetadataProvider implements LifecycleInterface
         });
 
         return $fiber->start();
-    }
-
-    /**
-     * Apply the status-inspection, back-off and cache-only-on-2xx policy to a
-     * fetched response.
-     *
-     * Split out from {@see self::httpGetJson()} so the decode/cache decision is
-     * unit-testable by Reflection without issuing a real request. The body is
-     * trusted only when the status is 2xx and decodes to a JSON object; a
-     * transport failure (`$body === false`), an unparseable/non-2xx status, or
-     * a non-object body all return null and cache nothing. A 429/503 records a
-     * `Retry-After` back-off so the next call waits before retrying.
-     *
-     * @param string                  $cacheKey In-memory cache key (md5 of URL).
-     * @param string|false            $body     Raw response body, or false on
-     *                                           transport failure.
-     * @param array<int, string>      $headers  Raw response header lines for the
-     *                                           whole redirect chain, in order;
-     *                                           the FINAL status line gates the
-     *                                           body.
-     *
-     * @return array<string, mixed>|null Decoded JSON object on a cacheable 2xx,
-     *     null otherwise.
-     */
-    private function handleResponse(string $cacheKey, string|false $body, array $headers): ?array
-    {
-        if ($body === false) {
-            return null;
-        }
-
-        $status = $this->parseHttpStatus($headers);
-
-        // Treat any non-2xx (or unparseable) status as failure: never decode
-        // or cache the error body. Record a back-off on 429/503 so the next
-        // request honours MAL's Retry-After before trying again.
-        if ($status === null || $status < 200 || $status >= 300) {
-            if ($status === 429 || $status === 503) {
-                $this->recordRetryAfter($headers);
-            }
-
-            return null;
-        }
-
-        /** @var mixed $decoded */
-        $decoded = json_decode($body, true);
-        if (!is_array($decoded)) {
-            return null;
-        }
-
-        /** @var array<string, mixed> $decoded */
-        $this->cache[$cacheKey] = $decoded;
-
-        return $decoded;
     }
 
     /**
@@ -440,77 +387,6 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     private function getHttpClient(): Client
     {
         return $this->httpClient ??= new Client();
-    }
-
-    /**
-     * Parse the numeric HTTP status code of the FINAL response from a
-     * stream-wrapper header set.
-     *
-     * PHP's HTTP stream wrapper follows redirects (`follow_location` is on by
-     * default) and `$http_response_header` ACCUMULATES the headers of every
-     * response in the redirect chain, in order. The first status line therefore
-     * belongs to an intermediate hop (e.g. a `301`/`302`), while the body that
-     * `file_get_contents()` returns is the payload of the FINAL response. So the
-     * status that gates the body is the LAST status line in the array, not the
-     * first — reading `$headers[0]` would misread a redirected `200` as a `3xx`
-     * and discard a perfectly valid response.
-     *
-     * The header array interleaves status lines (`HTTP/1.1 200 OK`) with field
-     * lines (`Content-Type: ...`); only entries that look like a status line are
-     * considered, and the last such entry wins. Returns the three-digit code, or
-     * null when the header set is empty or contains no recognisable status line
-     * (treated by the caller as a failure, never as a 200).
-     *
-     * @param array<int, string> $headers Raw response header lines for the whole
-     *     redirect chain, in order.
-     *
-     * @return int|null Numeric status code of the final response, or null when
-     *     none can be parsed.
-     */
-    private function parseHttpStatus(array $headers): ?int
-    {
-        $status = null;
-
-        // A status line is `HTTP/<major>[.<minor>] <3-digit-code> [reason]`.
-        // The optional reason phrase (and any trailing space) is irrelevant, so
-        // the pattern stops after the code. Iterate the whole accumulated set
-        // and let the LAST matching line win — that is the final response.
-        foreach ($headers as $line) {
-            if (preg_match('#^HTTP/\d(?:\.\d)?\s+(\d{3})#i', $line, $m) === 1) {
-                $status = (int) $m[1];
-            }
-        }
-
-        return $status;
-    }
-
-    /**
-     * Record a back-off window from a 429/503 response's `Retry-After` header.
-     *
-     * `Retry-After` may be given as a number of seconds; a missing or
-     * non-numeric value falls back to one rate-limit interval. The resulting
-     * absolute deadline is stored in {@see self::$retryAfterUntil}, which
-     * {@see self::enforceRateLimit()} waits out before the next request.
-     *
-     * @param array<int, string> $headers Raw response header lines.
-     *
-     * @return void
-     */
-    private function recordRetryAfter(array $headers): void
-    {
-        $delaySeconds = self::RATE_LIMIT_INTERVAL_SEC;
-
-        foreach ($headers as $line) {
-            if (preg_match('#^Retry-After:\s*(\d+)#i', $line, $m) === 1) {
-                $delaySeconds = (float) $m[1];
-                break;
-            }
-        }
-
-        $until = ($this->clock)() + $delaySeconds;
-        if ($until > $this->retryAfterUntil) {
-            $this->retryAfterUntil = $until;
-        }
     }
 
     /**

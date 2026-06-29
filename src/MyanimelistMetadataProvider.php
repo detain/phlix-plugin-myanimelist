@@ -97,11 +97,6 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     private array $settings;
 
     /**
-     * Host PSR-11 container for resolving services.
-     */
-    private ?ContainerInterface $container = null;
-
-    /**
      * Unix timestamp (with microseconds) of the last API request, for rate limiting.
      */
     private float $lastRequestTimestamp = 0.0;
@@ -159,11 +154,11 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     /**
      * Called by the loader once when the plugin is enabled.
      *
-     * Stashes the host container, performs a lightweight connectivity +
-     * credential check (a one-result search) so a bad Client ID or unreachable
-     * MAL surfaces immediately rather than on the first library scan, and
-     * registers an adapter with the host MetadataManager so the server's
-     * metadata pipeline can actually consume MAL results.
+     * Performs a lightweight connectivity + credential check (a one-result
+     * search) so a bad Client ID or unreachable MAL surfaces immediately
+     * rather than on the first library scan, and registers an adapter with
+     * the host MetadataManager so the server's metadata pipeline can actually
+     * consume MAL results.
      *
      * @param ContainerInterface $container Host PSR-11 container.
      *
@@ -173,8 +168,6 @@ class MyanimelistMetadataProvider implements LifecycleInterface
      */
     public function onEnable(ContainerInterface $container): void
     {
-        $this->container = $container;
-
         $check = $this->httpGetJson(
             self::API_BASE . '/anime?q=test&limit=1&fields=id'
         );
@@ -272,14 +265,13 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     /**
      * Called by the loader once when the plugin is disabled.
      *
-     * Releases the stashed container reference and drops the response cache.
-     * MAL holds no open sockets, so there is nothing else to tear down.
+     * Drops the response cache. MAL holds no open sockets, so there is
+     * nothing else to tear down.
      *
      * @return void
      */
     public function onDisable(): void
     {
-        $this->container = null;
         $this->cache = [];
     }
 
@@ -383,7 +375,13 @@ class MyanimelistMetadataProvider implements LifecycleInterface
 
         $this->enforceRateLimit();
 
-        return $this->requestAsync($url, $cacheKey);
+        $result = $this->requestAsync($url, $cacheKey);
+        if (!is_array($result)) {
+            return null;
+        }
+
+        /** @var array<string, mixed> $result */
+        return $result;
     }
 
     /**
@@ -578,6 +576,8 @@ class MyanimelistMetadataProvider implements LifecycleInterface
      * @param array<string, mixed> $response Decoded search JSON.
      *
      * @return int|null First node ID or null when the result set is empty.
+     *
+     * @internal Kept for test compatibility via reflection.
      */
     private function parseSearchResponse(array $response): ?int
     {
@@ -593,6 +593,10 @@ class MyanimelistMetadataProvider implements LifecycleInterface
 
         $node = $first['node'] ?? null;
         if (!is_array($node) || !isset($node['id'])) {
+            return null;
+        }
+
+        if (!is_numeric($node['id'])) {
             return null;
         }
 
@@ -642,7 +646,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface
                 continue;
             }
 
-            $id = (int) $node['id'];
+            $id = is_numeric($node['id']) ? (int) $node['id'] : 0;
 
             // Collect all titles for this candidate
             $titles = [];
@@ -823,7 +827,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface
         $title = isset($raw['title']) && is_string($raw['title']) ? $raw['title'] : '';
 
         return [
-            'id'             => (int) $raw['id'],
+            'id'             => is_numeric($raw['id']) ? (int) $raw['id'] : 0,
             'title'          => $title,
             'en_title'       => $enTitle,
             'ja_title'       => $jaTitle,
@@ -904,30 +908,30 @@ class MyanimelistMetadataProvider implements LifecycleInterface
         $filename = pathinfo($filePath, PATHINFO_FILENAME) ?: '';
 
         // Strip common release group patterns: [GroupName], (TX), (...)
-        $clean = preg_replace('/\[[^\]]+\]/', '', $filename);
-        $clean = preg_replace('/\(TX\)/', '', $clean);
-        $clean = preg_replace('/\([^\)]+\)/', '', $clean);
+        $clean = preg_replace('/\[[^\]]+\]/', '', $filename ?? '');
+        $clean = preg_replace('/\(TX\)/', '', $clean ?? '');
+        $clean = preg_replace('/\([^\)]+\)/', '', $clean ?? '');
 
         // Strip episode patterns: S01E02, 01x02, Episode 01, Episode.01
         // (standalone episode strip happens AFTER resolution/codec/source strip below)
-        $clean = preg_replace('/[Ss]\d{1,2}[Ee]\d{1,4}/', '', $clean);
-        $clean = preg_replace('/\d{1,2}[Xx]\d{1,4}/', '', $clean);
-        $clean = preg_replace('/(?:^|[.\-_ ])[Ee]p?[i]?[t]?[.]?\d{1,4}\b/i', '', $clean);
+        $clean = preg_replace('/[Ss]\d{1,2}[Ee]\d{1,4}/', '', $clean ?? '');
+        $clean = preg_replace('/\d{1,2}[Xx]\d{1,4}/', '', $clean ?? '');
+        $clean = preg_replace('/(?:^|[.\-_ ])[Ee]p?[i]?[t]?[.]?\d{1,4}\b/i', '', $clean ?? '');
 
         // Strip common suffixes: 720p, 1080p, BluRay, HDTV, etc.
         // MUST run before standalone-episode strip so episode numbers become genuinely trailing
-        $clean = preg_replace('/(720p|1080p|2160p|480p|BluRay|BRRip|HDRip|HDTV|DVDRip|x264|x265|HEVC|AAC|AC3)/i', '', $clean);
+        $clean = preg_replace('/(720p|1080p|2160p|480p|BluRay|BRRip|HDRip|HDTV|DVDRip|x264|x265|HEVC|AAC|AC3)/i', '', $clean ?? '');
 
         // Collapse any consecutive dots left behind by resolution/codec stripping
         // (e.g. ".720p.BluRay.x264" → "..." then → ".")
-        $clean = preg_replace('/\.{2,}/', '.', $clean);
+        $clean = preg_replace('/\.{2,}/', '.', $clean ?? '');
 
         // Strip year patterns: (2016), trailing 2001/2023
-        $clean = preg_replace('/\(\d{4}\)/', '', $clean);
-        $clean = preg_replace('/\s+\d{4}$/', '', $clean);
+        $clean = preg_replace('/\(\d{4}\)/', '', $clean ?? '');
+        $clean = preg_replace('/\s+\d{4}$/', '', $clean ?? '');
 
         // Strip resolution and codec patterns (e.g. 1920x1080)
-        $clean = preg_replace('/\d{3,4}[xX]\d{3,4}/', '', $clean);
+        $clean = preg_replace('/\d{3,4}[xX]\d{3,4}/', '', $clean ?? '');
 
         // Strip leading/trailing dashes, dots, underscores, spaces
         // Must happen BEFORE standalone-episode strip so trailing separators don't block episode detection
@@ -938,14 +942,14 @@ class MyanimelistMetadataProvider implements LifecycleInterface
         $clean = preg_replace('/[.\- ][0-9]{1,4}$/', '', $clean);
 
         // Replace remaining dots with spaces (common in anime filenames)
-        $clean = str_replace('.', ' ', $clean);
+        $clean = str_replace('.', ' ', $clean ?? '');
 
         // If result is too short or looks like garbage, skip
         if (strlen($clean) < 2) {
             return null;
         }
 
-        return $clean !== '' ? $clean : null;
+        return $clean;
     }
 
     // -------------------------------------------------------------------------
@@ -1001,13 +1005,17 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     /**
      * Map a MAL `media_type` value to a normalized type string.
      *
-     * @param string|null $mediaType Raw MAL media_type (e.g. "tv", "movie").
+     * @param mixed $mediaType Raw MAL media_type (e.g. "tv", "movie").
      *
      * @return string|null Normalized type or null when unknown/absent.
      */
-    private function mapType(?string $mediaType): ?string
+    private function mapType(mixed $mediaType): ?string
     {
-        if ($mediaType === null || $mediaType === '') {
+        if (!is_string($mediaType)) {
+            return null;
+        }
+
+        if ($mediaType === '') {
             return null;
         }
 
@@ -1029,13 +1037,17 @@ class MyanimelistMetadataProvider implements LifecycleInterface
      * finished_airing → 'Finished', currently_airing → 'Currently Airing',
      * not_yet_aired → 'Upcoming'.
      *
-     * @param string|null $status Raw MAL status string.
+     * @param mixed $status Raw MAL status string.
      *
      * @return string|null Mapped status or null when unknown/absent.
      */
-    private function mapStatus(?string $status): ?string
+    private function mapStatus(mixed $status): ?string
     {
-        if ($status === null || $status === '') {
+        if (!is_string($status)) {
+            return null;
+        }
+
+        if ($status === '') {
             return null;
         }
 
@@ -1052,13 +1064,17 @@ class MyanimelistMetadataProvider implements LifecycleInterface
      *
      * Uses the host tick convention (1 second = 10,000,000 100ns ticks).
      *
-     * @param int|null $seconds Average episode duration in seconds.
+     * @param mixed $seconds Average episode duration in seconds.
      *
      * @return int|null Runtime in ticks, or null when duration is unknown/zero.
      */
-    private function mapRuntimeTicks(?int $seconds): ?int
+    private function mapRuntimeTicks(mixed $seconds): ?int
     {
-        if ($seconds === null || $seconds <= 0) {
+        if (!is_int($seconds)) {
+            return null;
+        }
+
+        if ($seconds <= 0) {
             return null;
         }
 

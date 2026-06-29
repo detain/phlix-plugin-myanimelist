@@ -9,55 +9,7 @@ parameters:
         - src/MyanimelistMetadataProviderAdapter.php
     ignoreErrors:
         -
-            message: '#^Cannot cast mixed to int\.$#'
-            identifier: cast.int
-            count: 3
-            path: src/MyanimelistMetadataProvider.php
-
-        -
-            message: '#^Method Phlix\\Myanimelist\\MyanimelistMetadataProvider\:\:httpGetJson\(\) should return array\<string, mixed\>\|null but returns mixed\.$#'
-            identifier: return.type
-            count: 1
-            path: src/MyanimelistMetadataProvider.php
-
-        -
             message: '#^Method Phlix\\Myanimelist\\MyanimelistMetadataProvider\:\:parseSearchResponse\(\) is unused\.$#'
             identifier: method.unused
-            count: 1
-            path: src/MyanimelistMetadataProvider.php
-
-        -
-            message: '#^Parameter \#1 \$mediaType of method Phlix\\Myanimelist\\MyanimelistMetadataProvider\:\:mapType\(\) expects string\|null, mixed given\.$#'
-            identifier: argument.type
-            count: 1
-            path: src/MyanimelistMetadataProvider.php
-
-        -
-            message: '#^Parameter \#1 \$seconds of method Phlix\\Myanimelist\\MyanimelistMetadataProvider\:\:mapRuntimeTicks\(\) expects int\|null, mixed given\.$#'
-            identifier: argument.type
-            count: 1
-            path: src/MyanimelistMetadataProvider.php
-
-        -
-            message: '#^Parameter \#1 \$status of method Phlix\\Myanimelist\\MyanimelistMetadataProvider\:\:mapStatus\(\) expects string\|null, mixed given\.$#'
-            identifier: argument.type
-            count: 1
-            path: src/MyanimelistMetadataProvider.php
-
-        -
-            message: '#^Parameter \#3 \$subject of function preg_replace expects array\<float\|int\|string\>|string, string\|null given\.$#'
-            identifier: argument.type
-            count: 11
-            path: src/MyanimelistMetadataProvider.php
-
-        -
-            message: '#^Property Phlix\\Myanimelist\\MyanimelistMetadataProvider\:\:\$container is never read, only written\.$#'
-            identifier: property.onlyWritten
-            count: 1
-            path: src/MyanimelistMetadataProvider.php
-
-        -
-            message: '#^Strict comparison using \!\=\= between non-falsy-string and '''' will always evaluate to true\.$#'
-            identifier: notIdentical.alwaysTrue
             count: 1
             path: src/MyanimelistMetadataProvider.php

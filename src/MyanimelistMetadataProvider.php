@@ -762,32 +762,42 @@ class MyanimelistMetadataProvider implements LifecycleInterface
      */
     private function extractAnimeName(string $filePath): ?string
     {
-        $filename = pathinfo($filePath, PATHINFO_FILENAME);
+        /** @var string $filename pathinfo() returns string|false, never null for PATHINFO_FILENAME */
+        $filename = pathinfo($filePath, PATHINFO_FILENAME) ?: '';
 
         // Strip common release group patterns: [GroupName], (TX), (...)
         $clean = preg_replace('/\[[^\]]+\]/', '', $filename);
         $clean = preg_replace('/\(TX\)/', '', $clean);
         $clean = preg_replace('/\([^\)]+\)/', '', $clean);
 
-        // Strip episode patterns: S01E02, 01x02, Episode 01, Episode.01, standalone 01
+        // Strip episode patterns: S01E02, 01x02, Episode 01, Episode.01
+        // (standalone episode strip happens AFTER resolution/codec/source strip below)
         $clean = preg_replace('/[Ss]\d{1,2}[Ee]\d{1,4}/', '', $clean);
         $clean = preg_replace('/\d{1,2}[Xx]\d{1,4}/', '', $clean);
-        $clean = preg_replace('/[.\-_ ]*[Ee]p?[i]?[t]?[.]?\d{1,4}/i', '', $clean);
-        // Strip standalone episode numbers: leading ., -, _, space before 1-4 digits at end
-        $clean = preg_replace('/[.\- ][0-9]{1,4}$/', '', $clean);
+        $clean = preg_replace('/(?:^|[.\-_ ])[Ee]p?[i]?[t]?[.]?\d{1,4}\b/i', '', $clean);
 
         // Strip common suffixes: 720p, 1080p, BluRay, HDTV, etc.
+        // MUST run before standalone-episode strip so episode numbers become genuinely trailing
         $clean = preg_replace('/(720p|1080p|2160p|480p|BluRay|BRRip|HDRip|HDTV|DVDRip|x264|x265|HEVC|AAC|AC3)/i', '', $clean);
+
+        // Collapse any consecutive dots left behind by resolution/codec stripping
+        // (e.g. ".720p.BluRay.x264" → "..." then → ".")
+        $clean = preg_replace('/\.{2,}/', '.', $clean);
 
         // Strip year patterns: (2016), trailing 2001/2023
         $clean = preg_replace('/\(\d{4}\)/', '', $clean);
         $clean = preg_replace('/\s+\d{4}$/', '', $clean);
 
-        // Strip resolution and codec patterns
+        // Strip resolution and codec patterns (e.g. 1920x1080)
         $clean = preg_replace('/\d{3,4}[xX]\d{3,4}/', '', $clean);
 
         // Strip leading/trailing dashes, dots, underscores, spaces
+        // Must happen BEFORE standalone-episode strip so trailing separators don't block episode detection
         $clean = trim((string) $clean, '.-_ ');
+
+        // Strip standalone episode numbers: leading separator before 1-4 digits at end
+        // Now genuinely trailing after resolution/codec/source has been stripped
+        $clean = preg_replace('/[.\- ][0-9]{1,4}$/', '', $clean);
 
         // Replace remaining dots with spaces (common in anime filenames)
         $clean = str_replace('.', ' ', $clean);

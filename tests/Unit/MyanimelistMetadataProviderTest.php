@@ -118,9 +118,21 @@ final class MyanimelistMetadataProviderTest extends TestCase
                 'S01E01.mkv',
                 null,
             ],
-            'dotted name keeps trailing episode when resolution follows' => [
+            'dotted name: resolution strip before episode strip leaves no episode' => [
                 'Neon.Genesis.Evangelion.01.720p.BluRay.x264.mkv',
-                'Neon Genesis Evangelion 01',
+                'Neon Genesis Evangelion',
+            ],
+            'year not treated as episode number' => [
+                'Steins;Gate 2011',
+                'Steins;Gate',
+            ],
+            'high episode number before resolution' => [
+                'One.Piece.1000.1080p',
+                'One Piece',
+            ],
+            'E13 episode format before resolution dimensions' => [
+                'Fate.Zero.E13.1920x1080.mkv',
+                'Fate Zero',
             ],
         ];
     }

@@ -308,8 +308,10 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
      * @param string                  $cacheKey In-memory cache key (md5 of URL).
      * @param string|false            $body     Raw response body, or false on
      *                                           transport failure.
-     * @param array<int, string>      $headers  Raw response header lines; index
-     *                                           0 is the status line.
+     * @param array<int, string>      $headers  Raw response header lines for the
+     *                                           whole redirect chain, in order;
+     *                                           the FINAL status line gates the
+     *                                           body.
      *
      * @return array<string, mixed>|null Decoded JSON object on a cacheable 2xx,
      *     null otherwise.
@@ -346,31 +348,45 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
     }
 
     /**
-     * Parse the numeric HTTP status code from a stream-wrapper header set.
+     * Parse the numeric HTTP status code of the FINAL response from a
+     * stream-wrapper header set.
      *
-     * The first entry of `$http_response_header` is the status line, e.g.
-     * `HTTP/1.1 429 Too Many Requests`. Returns the three-digit code or null
-     * when the header set is empty or the status line is unrecognisable.
+     * PHP's HTTP stream wrapper follows redirects (`follow_location` is on by
+     * default) and `$http_response_header` ACCUMULATES the headers of every
+     * response in the redirect chain, in order. The first status line therefore
+     * belongs to an intermediate hop (e.g. a `301`/`302`), while the body that
+     * `file_get_contents()` returns is the payload of the FINAL response. So the
+     * status that gates the body is the LAST status line in the array, not the
+     * first — reading `$headers[0]` would misread a redirected `200` as a `3xx`
+     * and discard a perfectly valid response.
      *
-     * @param array<int, string> $headers Raw response header lines; index 0 is
-     *     the status line.
+     * The header array interleaves status lines (`HTTP/1.1 200 OK`) with field
+     * lines (`Content-Type: ...`); only entries that look like a status line are
+     * considered, and the last such entry wins. Returns the three-digit code, or
+     * null when the header set is empty or contains no recognisable status line
+     * (treated by the caller as a failure, never as a 200).
      *
-     * @return int|null Numeric status code, or null when it cannot be parsed.
+     * @param array<int, string> $headers Raw response header lines for the whole
+     *     redirect chain, in order.
+     *
+     * @return int|null Numeric status code of the final response, or null when
+     *     none can be parsed.
      */
     private function parseHttpStatus(array $headers): ?int
     {
-        $statusLine = $headers[0] ?? '';
-        if (preg_match('#\s(\d{3})\s#', $statusLine, $m) === 1) {
-            return (int) $m[1];
+        $status = null;
+
+        // A status line is `HTTP/<major>[.<minor>] <3-digit-code> [reason]`.
+        // The optional reason phrase (and any trailing space) is irrelevant, so
+        // the pattern stops after the code. Iterate the whole accumulated set
+        // and let the LAST matching line win — that is the final response.
+        foreach ($headers as $line) {
+            if (preg_match('#^HTTP/\d(?:\.\d)?\s+(\d{3})#i', $line, $m) === 1) {
+                $status = (int) $m[1];
+            }
         }
 
-        // Fallback: some servers omit the trailing reason phrase
-        // ("HTTP/1.1 204"), leaving no space after the code.
-        if (preg_match('#\s(\d{3})$#', $statusLine, $m) === 1) {
-            return (int) $m[1];
-        }
-
-        return null;
+        return $status;
     }
 
     /**

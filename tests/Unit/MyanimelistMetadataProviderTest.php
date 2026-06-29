@@ -529,6 +529,41 @@ final class MyanimelistMetadataProviderTest extends TestCase
             'no reason phrase'        => [['HTTP/1.1 204'], 204],
             'empty header set'        => [[], null],
             'garbage status line'     => [['not a status line'], null],
+            // Redirect chains: $http_response_header accumulates every hop, so
+            // the FINAL status line — not the first — gates the body.
+            '302 then 200 resolves to final 200' => [
+                [
+                    'HTTP/1.1 302 Found',
+                    'Location: https://api.example/v2/anime/1',
+                    'HTTP/1.1 200 OK',
+                    'Content-Type: application/json',
+                ],
+                200,
+            ],
+            '302 then 404 resolves to final 404' => [
+                [
+                    'HTTP/1.1 302 Found',
+                    'Location: https://api.example/v2/anime/0',
+                    'HTTP/1.1 404 Not Found',
+                    'Content-Type: application/json',
+                ],
+                404,
+            ],
+            'two redirects then 200 resolves to final 200' => [
+                [
+                    'HTTP/1.1 301 Moved Permanently',
+                    'Location: https://api.example/a',
+                    'HTTP/1.1 302 Found',
+                    'Location: https://api.example/b',
+                    'HTTP/2 200',
+                    'content-type: application/json',
+                ],
+                200,
+            ],
+            'only field lines after a status still reads the status' => [
+                ['HTTP/1.1 200 OK', 'Content-Type: application/json', 'Cache-Control: no-store'],
+                200,
+            ],
         ];
     }
 
@@ -551,6 +586,57 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $cache = $this->readPrivate($provider, 'cache');
         $this->assertArrayHasKey('ckey', $cache);
         $this->assertSame($result, $cache['ckey']);
+    }
+
+    /**
+     * A redirect chain (302 → 200) whose accumulated headers end in a 2xx must
+     * be trusted: the FINAL status, not the intermediate 3xx, gates the body, so
+     * the JSON is decoded, returned and cached.
+     */
+    public function test_handle_response_caches_redirected_final_2xx(): void
+    {
+        $provider = $this->makeProvider();
+        $body = '{"data":[{"node":{"id":42}}]}';
+        $headers = [
+            'HTTP/1.1 302 Found',
+            'Location: https://api.myanimelist.net/v2/anime?q=x',
+            'HTTP/1.1 200 OK',
+            'Content-Type: application/json',
+        ];
+
+        /** @var array<string, mixed>|null $result */
+        $result = $this->invokePrivate($provider, 'handleResponse', ['ckey', $body, $headers]);
+
+        $this->assertIsArray($result);
+        $this->assertSame([['node' => ['id' => 42]]], $result['data']);
+
+        /** @var array<string, mixed> $cache */
+        $cache = $this->readPrivate($provider, 'cache');
+        $this->assertArrayHasKey('ckey', $cache);
+        $this->assertSame($result, $cache['ckey']);
+    }
+
+    /**
+     * A redirect chain that ends in an error (302 → 404) must resolve to the
+     * FINAL 404 and be dropped: even a well-formed JSON body is neither returned
+     * nor cached.
+     */
+    public function test_handle_response_drops_redirected_final_error(): void
+    {
+        $provider = $this->makeProvider();
+        // A valid JSON object that would pass is_array() — only the final status gates it.
+        $body = '{"error":"not_found","message":"Unknown anime"}';
+        $headers = [
+            'HTTP/1.1 302 Found',
+            'Location: https://api.myanimelist.net/v2/anime/0',
+            'HTTP/1.1 404 Not Found',
+            'Content-Type: application/json',
+        ];
+
+        $result = $this->invokePrivate($provider, 'handleResponse', ['ckey', $body, $headers]);
+
+        $this->assertNull($result);
+        $this->assertSame([], $this->readPrivate($provider, 'cache'));
     }
 
     /**

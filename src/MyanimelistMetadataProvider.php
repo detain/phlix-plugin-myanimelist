@@ -41,7 +41,7 @@ use Psr\Container\ContainerInterface;
  * @package Phlix\Myanimelist
  * @since 0.1.0
  */
-final class MyanimelistMetadataProvider implements LifecycleInterface
+class MyanimelistMetadataProvider implements LifecycleInterface
 {
     /**
      * MAL API v2 base URL.
@@ -149,7 +149,8 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
         );
         if ($check === null) {
             throw new \RuntimeException(
-                'MyAnimeList API unreachable. Check your Client ID and network connectivity.'
+                'MyAnimeList API unreachable or Client ID rejected (401 Unauthorized).'
+                . ' Check your Client ID and network connectivity.'
             );
         }
     }
@@ -254,7 +255,7 @@ final class MyanimelistMetadataProvider implements LifecycleInterface
      * @return array<string, mixed>|null Decoded JSON object or null on
      *     transport/HTTP/JSON failure.
      */
-    private function httpGetJson(string $url): ?array
+    protected function httpGetJson(string $url): ?array
     {
         $cacheKey = md5($url);
         if (isset($this->cache[$cacheKey])) {

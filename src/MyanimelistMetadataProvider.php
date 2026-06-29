@@ -129,6 +129,14 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     private \Closure $clock;
 
     /**
+     * Sleep function for rate-limit delays. Allows injection of a no-op or
+     * fake in tests when Workerman's Timer is not available.
+     *
+     * @var \Closure(float): void
+     */
+    private \Closure $timerSleep;
+
+    /**
      * Shared HTTP client instance for connection pooling.
      */
     private ?Client $httpClient = null;
@@ -143,6 +151,9 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     {
         $this->settings = $settings;
         $this->clock = static fn(): float => microtime(true);
+        $this->timerSleep = static function (float $seconds): void {
+            Timer::sleep($seconds);
+        };
     }
 
     /**
@@ -428,14 +439,14 @@ class MyanimelistMetadataProvider implements LifecycleInterface
         // Honour a 429/503 Retry-After back-off first: do not issue the next
         // request until the recorded deadline has passed.
         if ($this->retryAfterUntil > $now) {
-            Timer::sleep($this->retryAfterUntil - $now);
+            ($this->timerSleep)($this->retryAfterUntil - $now);
             $this->retryAfterUntil = 0.0;
             $now = ($this->clock)();
         }
 
         $elapsed = $now - $this->lastRequestTimestamp;
         if ($elapsed < self::RATE_LIMIT_INTERVAL_SEC) {
-            Timer::sleep(self::RATE_LIMIT_INTERVAL_SEC - $elapsed);
+            ($this->timerSleep)(self::RATE_LIMIT_INTERVAL_SEC - $elapsed);
         }
 
         $this->lastRequestTimestamp = ($this->clock)();

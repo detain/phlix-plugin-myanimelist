@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Phlix\Myanimelist;
 
+use Phlix\Shared\Metadata\MetadataSourceInterface;
 use Phlix\Shared\Plugin\LifecycleInterface;
 use Psr\Container\ContainerInterface;
 use Workerman\Coroutine;
@@ -46,7 +47,7 @@ use Workerman\Timer;
  * @package Phlix\Myanimelist
  * @since 0.1.0
  */
-class MyanimelistMetadataProvider implements LifecycleInterface
+class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceInterface
 {
     /**
      * MAL API v2 base URL.
@@ -137,6 +138,14 @@ class MyanimelistMetadataProvider implements LifecycleInterface
     private ?Client $httpClient = null;
 
     /**
+     * Lazily-built host-contract adapter, reused by both the legacy
+     * {@see registerWithMetadataManager()} path and the
+     * {@see MetadataSourceInterface} triad below so a single object owns the
+     * external-id ⇄ MAL-id translation.
+     */
+    private ?MyanimelistMetadataProviderAdapter $adapter = null;
+
+    /**
      * @param array{client_id: string, use_ssl_verification?: bool} $settings
      *     Plugin settings from plugin.json. client_id is the MyAnimeList API
      *     client ID, sent as the X-MAL-CLIENT-ID header on every request.
@@ -207,12 +216,121 @@ class MyanimelistMetadataProvider implements LifecycleInterface
             return;
         }
 
-        $adapter = new MyanimelistMetadataProviderAdapter($this);
         $manager->registerProvider(
             MyanimelistMetadataProviderAdapter::SOURCE_NAME,
-            $adapter,
-            ['anime'],
+            $this->adapter(),
+            $this->supportedMediaTypes(),
         );
+    }
+
+    /**
+     * Lazily build (and cache) the host-contract adapter that bridges this
+     * provider's filename/MAL-id lookup to the external-id triad.
+     *
+     * @return MyanimelistMetadataProviderAdapter
+     */
+    private function adapter(): MyanimelistMetadataProviderAdapter
+    {
+        return $this->adapter ??= new MyanimelistMetadataProviderAdapter($this);
+    }
+
+    // -------------------------------------------------------------------------
+    // MetadataSourceInterface (Phlix\Shared\Metadata) — the first-class typed
+    // contract the host SourceRegistry registers on plugin-enable and
+    // deregisters on plugin-disable (Step 3.5). The triad delegates to the
+    // existing adapter so there is a single source of truth for the
+    // external-id ⇄ MAL-id lookup.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Canonical source name — matches the host anime priority-map entry
+     * `['anidb', 'myanimelist', 'tvdb', 'fanart', 'local']`.
+     *
+     * @return non-empty-string Always `myanimelist`.
+     */
+    public function sourceName(): string
+    {
+        return MyanimelistMetadataProviderAdapter::SOURCE_NAME;
+    }
+
+    /**
+     * Media types MAL answers for — anime only (matches the legacy
+     * registerProvider() type list).
+     *
+     * @return list<non-empty-string> Always `['anime']`.
+     */
+    public function supportedMediaTypes(): array
+    {
+        return ['anime'];
+    }
+
+    /**
+     * @param string               $query   Free-text anime title.
+     * @param array<string, mixed> $options Optional hints (ignored by MAL).
+     * @return list<array{id: non-empty-string, title: string, overview?: string, poster_path?: string}>
+     */
+    public function search(string $query, array $options = []): array
+    {
+        $results = [];
+        foreach ($this->adapter()->search($query, $options) as $row) {
+            $id = $row['id'] ?? '';
+            if (!is_string($id) || $id === '') {
+                continue; // a usable external id is mandatory for the host triad
+            }
+            /** @var array{id: non-empty-string, title: string, overview?: string, poster_path?: string} $entry */
+            $entry = ['id' => $id, 'title' => (string) ($row['title'] ?? '')];
+            if (isset($row['overview']) && is_string($row['overview'])) {
+                $entry['overview'] = $row['overview'];
+            }
+            if (isset($row['poster_path']) && is_string($row['poster_path'])) {
+                $entry['poster_path'] = $row['poster_path'];
+            }
+            $results[] = $entry;
+        }
+
+        return $results;
+    }
+
+    /**
+     * @param string               $externalId MAL anime ID as a decimal string.
+     * @param array<string, mixed> $options    Optional hints (ignored).
+     * @return array<string, mixed>
+     */
+    public function getDetails(string $externalId, array $options = []): array
+    {
+        return $this->adapter()->getDetails($externalId, $options);
+    }
+
+    /**
+     * @param string $externalId MAL anime ID as a decimal string.
+     * @return array<string, list<array{url: non-empty-string, width?: int, height?: int}>>
+     */
+    public function getImages(string $externalId): array
+    {
+        $images = [];
+        foreach ($this->adapter()->getImages($externalId) as $group => $entries) {
+            $list = [];
+            foreach ($entries as $entry) {
+                $url = $entry['url'] ?? '';
+                if (!is_string($url) || $url === '') {
+                    continue;
+                }
+                /** @var array{url: non-empty-string, width?: int, height?: int} $image */
+                $image = ['url' => $url];
+                if (isset($entry['width']) && is_int($entry['width'])) {
+                    $image['width'] = $entry['width'];
+                }
+                if (isset($entry['height']) && is_int($entry['height'])) {
+                    $image['height'] = $entry['height'];
+                }
+                $list[] = $image;
+            }
+            if ($list !== []) {
+                $images[(string) $group] = $list;
+            }
+        }
+
+        return $images;
     }
 
     /**

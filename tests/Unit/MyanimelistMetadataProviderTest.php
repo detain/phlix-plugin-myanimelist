@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Phlix\Myanimelist\Tests\Unit;
 
 use Phlix\Myanimelist\MyanimelistMetadataProvider;
+use Phlix\Shared\Metadata\MetadataSourceInterface;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -37,6 +38,26 @@ final class MyanimelistMetadataProviderTest extends TestCase
         );
 
         return $provider;
+    }
+
+    public function test_implements_shared_metadata_source_contract(): void
+    {
+        $provider = $this->makeProvider();
+
+        $this->assertInstanceOf(MetadataSourceInterface::class, $provider);
+        $this->assertSame('myanimelist', $provider->sourceName());
+        $this->assertSame(['anime'], $provider->supportedMediaTypes());
+    }
+
+    public function test_metadata_source_lookups_return_empty_for_invalid_external_id(): void
+    {
+        $provider = $this->makeProvider();
+
+        // Invalid external ids short-circuit through the adapter's parseMalId()
+        // guard to an empty result — no network call.
+        $this->assertSame([], $provider->getDetails('not-a-mal-id'));
+        $this->assertSame([], $provider->getDetails('0'));
+        $this->assertSame([], $provider->getImages('not-a-mal-id'));
     }
 
     /**

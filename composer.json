@@ -17,9 +17,6 @@
         "phpstan/phpstan": "^2.2",
         "phpunit/phpunit": "^10.0"
     },
-    "repositories": [
-        { "type": "vcs", "url": "https://github.com/detain/phlix-shared.git" }
-    ],
     "autoload": {
         "psr-4": {
             "Phlix\\Myanimelist\\": "src/"

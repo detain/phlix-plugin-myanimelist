@@ -47,9 +47,17 @@ The plugin is unsigned by design. Install via the Phlix admin UI:
 
 ## Configuration
 
-| Setting | Type | Required | Description |
-|---------|------|----------|-------------|
-| `client_id` | string (secret) | Yes | Your MAL API client ID, sent as the `X-MAL-CLIENT-ID` header |
+Configure these in the Phlix admin **Plugins → Configure** dialog.
+
+| Setting | Type | Required | Default | Description |
+|---------|------|----------|---------|-------------|
+| `client_id` | string (secret) | **Yes** | — | Your MyAnimeList API Client ID, sent as the `X-MAL-CLIENT-ID` header. |
+| `use_ssl_verification` | boolean | No | `true` | Verify TLS certificates when calling the MAL API. |
+
+### Where to get your Client ID
+
+Create an API application at [myanimelist.net/apiconfig](https://myanimelist.net/apiconfig)
+(App Type "web" or "other"), then copy its **Client ID** into `client_id`.
 
 ## How It Works
 

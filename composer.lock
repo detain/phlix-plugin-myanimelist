@@ -4,20 +4,20 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "b8dd619812e913c85abcd1ee39b587a4",
+    "content-hash": "dc72a37c8ae9a3038caa765e01487cdf",
     "packages": [
         {
             "name": "detain/phlix-shared",
-            "version": "v0.17.0",
+            "version": "v0.18.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/detain/phlix-shared.git",
-                "reference": "5a960769e579c735bf1df7d5d1d873a04b319873"
+                "reference": "1b2b06e42495e8f8efc9e3f266b6c9c719447806"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/detain/phlix-shared/zipball/5a960769e579c735bf1df7d5d1d873a04b319873",
-                "reference": "5a960769e579c735bf1df7d5d1d873a04b319873",
+                "url": "https://api.github.com/repos/detain/phlix-shared/zipball/1b2b06e42495e8f8efc9e3f266b6c9c719447806",
+                "reference": "1b2b06e42495e8f8efc9e3f266b6c9c719447806",
                 "shasum": ""
             },
             "require": {
@@ -51,9 +51,9 @@
             "description": "Shared interfaces, DTOs, event names, and protocol types used by both phlix-server and phlix-hub. Composer-installable, PHP 8.3+, zero I/O by charter — the only bundled network code is the blocking CurlArrTransport (CLI/test only); event-loop consumers MUST inject an async ArrTransportInterface.",
             "support": {
                 "issues": "https://github.com/detain/phlix-shared/issues",
-                "source": "https://github.com/detain/phlix-shared/tree/v0.17.0"
+                "source": "https://github.com/detain/phlix-shared/tree/v0.18.0"
             },
-            "time": "2026-07-09T00:21:58+00:00"
+            "time": "2026-07-11T00:05:49+00:00"
         },
         {
             "name": "psr/clock",

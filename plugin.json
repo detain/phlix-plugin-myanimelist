@@ -1,7 +1,7 @@
 {
     "name": "phlix-plugin-myanimelist",
-    "version": "0.1.0",
-    "phlix_min_server_version": "0.10.0",
+    "version": "0.2.0",
+    "phlix_min_server_version": "1.2.0",
     "type": "metadata-provider",
     "entry": "Phlix\\Myanimelist\\MyanimelistMetadataProvider",
     "events": [],
@@ -11,14 +11,16 @@
             "required": true,
             "secret": true,
             "label": "MyAnimeList Client ID",
-            "description": "Your MAL API client ID (from https://myanimelist.net/apiconfig). Sent as the X-MAL-CLIENT-ID header."
+            "description": "Your MyAnimeList API Client ID. Create an API application (type \"web\" or \"other\"), then copy its Client ID. Sent as the X-MAL-CLIENT-ID header.",
+            "link": "https://myanimelist.net/apiconfig",
+            "link_text": "MyAnimeList API applications"
         },
         "use_ssl_verification": {
             "type": "boolean",
             "required": false,
             "default": true,
             "label": "Verify SSL certificates",
-            "description": "Verify TLS certificates when calling the MyAnimeList API. Disable only behind a self-hosted proxy with a self-signed certificate."
+            "description": "Verify TLS certificates when calling the MyAnimeList API. Optional; default on. Disable only behind a self-hosted proxy with a self-signed certificate."
         }
     },
     "signature": null

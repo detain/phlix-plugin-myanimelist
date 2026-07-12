@@ -184,16 +184,6 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      */
     public function onEnable(ContainerInterface $container): void
     {
-        $check = $this->httpGetJson(
-            self::API_BASE . '/anime?q=test&limit=1&fields=id'
-        );
-        if ($check === null) {
-            throw new \RuntimeException(
-                'MyAnimeList API unreachable or Client ID rejected (401 Unauthorized).'
-                . ' Check your Client ID and network connectivity.'
-            );
-        }
-
         $this->registerWithMetadataManager($container);
     }
 

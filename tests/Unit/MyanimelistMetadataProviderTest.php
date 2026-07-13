@@ -114,6 +114,41 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $this->assertTrue(true);
     }
 
+    /**
+     * Regression guard for the production timeout bug: `onEnable()` used to
+     * perform a live connectivity/credential check (a blocking-ish MAL API
+     * call under the rate limiter) before registering with the host, so a
+     * slow/unreachable MyAnimeList API made the admin "enable plugin"
+     * request hang until the caller's own timeout fired ("The request timed
+     * out"). Fixed by removing that call entirely (commit 337c355).
+     *
+     * Asserting "does not throw" alone would not have caught a
+     * reintroduction of that call, since a successful-but-slow HTTP
+     * response also does not throw. This test additionally asserts
+     * `onEnable()` returns near-instantly: if it ever again reaches
+     * {@see enforceRateLimit()} on an unthrottled first call, it would take
+     * at least `RATE_LIMIT_INTERVAL_SEC` (1s via the injected blocking
+     * `usleep` timerSleep) — this fails long before that.
+     */
+    public function test_on_enable_completes_without_network_io_or_rate_limit_delay(): void
+    {
+        $container = $this->createMock(ContainerInterface::class);
+        $container->method('has')->willReturn(false);
+
+        $provider = $this->makeProvider();
+
+        $start = microtime(true);
+        $provider->onEnable($container);
+        $elapsed = microtime(true) - $start;
+
+        $this->assertLessThan(
+            0.25,
+            $elapsed,
+            'onEnable() took ' . $elapsed . 's — it must never perform network I/O or wait out '
+                . 'the rate limiter; either would surface to the admin UI as "the request timed out".',
+        );
+    }
+
     public function test_lookup_returns_empty_for_unparseable_filename(): void
     {
         // 'S01E01' strips to '' (< 2 chars) → lookup short-circuits before any HTTP.

@@ -14,6 +14,7 @@ namespace Phlix\Myanimelist;
 use Phlix\Shared\Metadata\MetadataSourceInterface;
 use Phlix\Shared\Plugin\LifecycleInterface;
 use Psr\Container\ContainerInterface;
+use Psr\Log\LoggerInterface;
 use Workerman\Coroutine;
 use Workerman\Coroutine\Coroutine\Fiber as CoroutineFiber;
 use Workerman\Http\Client;
@@ -153,6 +154,11 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     private ?MyanimelistMetadataProviderAdapter $adapter = null;
 
     /**
+     * Optional PSR-3 logger for debug output.
+     */
+    private ?LoggerInterface $logger = null;
+
+    /**
      * @param array{client_id: string, use_ssl_verification?: bool} $settings
      *     Plugin settings from plugin.json. client_id is the MyAnimeList API
      *     client ID, sent as the X-MAL-CLIENT-ID header on every request.
@@ -168,19 +174,22 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     }
 
     /**
+     * Inject an optional PSR-3 logger.
+     */
+    public function setLogger(LoggerInterface $logger): void
+    {
+        $this->logger = $logger;
+    }
+
+    /**
      * Called by the loader once when the plugin is enabled.
      *
-     * Performs a lightweight connectivity + credential check (a one-result
-     * search) so a bad Client ID or unreachable MAL surfaces immediately
-     * rather than on the first library scan, and registers an adapter with
-     * the host MetadataManager so the server's metadata pipeline can actually
-     * consume MAL results.
+     * Registers an adapter with the host MetadataManager so the server's
+     * metadata pipeline can consume MAL results. No blocking I/O is performed
+     * here — credential and connectivity validation happens lazily on the
+     * first API call.
      *
      * @param ContainerInterface $container Host PSR-11 container.
-     *
-     * @return void
-     *
-     * @throws \RuntimeException If MAL is unreachable or the Client ID is rejected.
      */
     public function onEnable(ContainerInterface $container): void
     {
@@ -492,6 +501,8 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
 
         $result = $this->requestAsync($url, $cacheKey);
         if (!is_array($result)) {
+            $this->logger?->debug('MAL API returned null, will retry on next request');
+
             return null;
         }
 

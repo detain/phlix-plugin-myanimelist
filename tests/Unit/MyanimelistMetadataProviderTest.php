@@ -14,6 +14,7 @@ namespace Phlix\Myanimelist\Tests\Unit;
 use Phlix\Myanimelist\MyanimelistMetadataProvider;
 use Phlix\Shared\Metadata\MetadataSourceInterface;
 use PHPUnit\Framework\TestCase;
+use Psr\Container\ContainerInterface;
 
 /**
  * Unit tests for the MyanimelistMetadataProvider plugin.
@@ -100,6 +101,17 @@ final class MyanimelistMetadataProviderTest extends TestCase
     public function test_subscribed_events_returns_empty_array(): void
     {
         $this->assertSame([], $this->makeProvider()->subscribedEvents());
+    }
+
+    public function test_on_enable_does_not_throw(): void
+    {
+        $container = $this->createMock(ContainerInterface::class);
+        $container->method('has')->willReturn(false);
+
+        $provider = $this->makeProvider();
+        // Should not throw even without MetadataManager present
+        $provider->onEnable($container);
+        $this->assertTrue(true);
     }
 
     public function test_lookup_returns_empty_for_unparseable_filename(): void

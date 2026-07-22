@@ -15,8 +15,6 @@ use Phlix\Shared\Metadata\MetadataSourceInterface;
 use Phlix\Shared\Plugin\LifecycleInterface;
 use Psr\Container\ContainerInterface;
 use Psr\Log\LoggerInterface;
-use Workerman\Coroutine;
-use Workerman\Coroutine\Coroutine\Fiber as CoroutineFiber;
 use Workerman\Http\Client;
 use Workerman\Http\Response;
 use Workerman\Timer;
@@ -99,6 +97,12 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     private const TICKS_PER_SECOND = 10_000_000;
 
     /**
+     * Poll interval (seconds) of the cooperative-wait loop that awaits an
+     * async HTTP response. 1ms matches the host convention in CLAUDE.md.
+     */
+    private const WAIT_INTERVAL_SEC = 0.001;
+
+    /**
      * Plugin settings from plugin.json.
      *
      * @var array{client_id: string, use_ssl_verification?: bool}
@@ -141,6 +145,17 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     private \Closure $timerSleep;
 
     /**
+     * Single tick of the cooperative-wait loop used while awaiting an async
+     * HTTP response. Defaults to a 1ms `usleep`, which under the Swoole
+     * runtime hook yields to the event loop rather than blocking the worker
+     * (see phlix-server/CLAUDE.md "Async Patterns"). Injectable so tests can
+     * drive the loop deterministically with a no-op.
+     *
+     * @var \Closure(): void
+     */
+    private \Closure $waitTick;
+
+    /**
      * Shared HTTP client instance for connection pooling.
      */
     private ?Client $httpClient = null;
@@ -171,6 +186,10 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         $this->timerSleep = static function (float $seconds): void {
             Timer::sleep($seconds);
         };
+        $this->waitTick = static function (): void {
+            // 1ms; hooked by the Swoole runtime to yield to the event loop.
+            usleep((int) (self::WAIT_INTERVAL_SEC * 1_000_000));
+        };
     }
 
     /**
@@ -182,12 +201,19 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     }
 
     /**
-     * Called by the loader once when the plugin is enabled.
+     * Called by the loader once when the plugin is enabled — and, once
+     * boot-time activation (plan_plugins F1) lands, on every worker start
+     * across all ~14 resident workers.
      *
-     * Registers an adapter with the host MetadataManager so the server's
-     * metadata pipeline can consume MAL results. No blocking I/O is performed
-     * here — credential and connectivity validation happens lazily on the
-     * first API call.
+     * This is the cheap **wire** step ONLY: it resolves the host
+     * MetadataManager from the container and registers a lightweight adapter.
+     * It performs NO network I/O, no DB migrations, no socket opens, no
+     * credential probe and never waits on the rate limiter, so it can run at
+     * boot in every worker without risking the item-5c3 boot-hang.
+     *
+     * The **connect** step — building the HTTP client and validating the MAL
+     * Client ID — is deferred lazily to the first API call
+     * ({@see getHttpClient()} / {@see httpGetJson()}), off the boot path.
      *
      * @param ContainerInterface $container Host PSR-11 container.
      */
@@ -260,14 +286,19 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     }
 
     /**
-     * Media types MAL answers for — anime only (matches the legacy
-     * registerProvider() type list).
+     * Media types MAL answers for.
      *
-     * @return list<non-empty-string> Always `['anime']`.
+     * Anime is deliberately NOT its own media type: `anime` is not a member of
+     * the `media_items.type` ENUM (it is only a scanner/library label), so a
+     * source indexed under `anime` is never consulted by the host resolver.
+     * MAL titles are stored as ordinary `series` (TV/OVA/ONA/special) or
+     * `movie` items; the provider answers for both and matches by title.
+     *
+     * @return list<non-empty-string> Always `['series', 'movie']`.
      */
     public function supportedMediaTypes(): array
     {
-        return ['anime'];
+        return ['series', 'movie'];
     }
 
     /**
@@ -480,10 +511,13 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * real data — it returns null. A 429/503 additionally records a back-off
      * from the `Retry-After` header so the next call waits before retrying.
      *
-     * Uses Workerman's Fiber-based async HTTP via workerman/http-client. The
-     * HTTP request is issued non-blockingly and the Fiber suspends until the
-     * response arrives, allowing the Workerman event loop to handle other
-     * requests during the wait.
+     * Uses the canonical non-blocking `workerman/http-client` cooperative-wait
+     * pattern (a `$state` array + a `while (!$state['done'] ...)` loop; see
+     * phlix-server/CLAUDE.md). The request is issued with `success`/`error`
+     * callbacks and the loop yields to the event loop until one of them fires,
+     * so the decoded body is returned to THIS caller on THIS call — no Fibers,
+     * no reliance on a suspend return value, no "populate on the next call"
+     * cache side-effect.
      *
      * @param string $url Absolute MAL API URL (already query-encoded).
      *
@@ -499,72 +533,98 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
 
         $this->enforceRateLimit();
 
-        $result = $this->requestAsync($url, $cacheKey);
-        if (!is_array($result)) {
-            $this->logger?->debug('MAL API returned null, will retry on next request');
+        $response = $this->requestAndWait($url);
+        if ($response === null) {
+            $this->logger?->debug('MAL API produced no response; will retry on next request');
 
             return null;
         }
 
-        /** @var array<string, mixed> $result */
-        return $result;
+        return $this->handleResponseObject($cacheKey, $response);
     }
 
     /**
-     * Issue an async HTTP GET and return the decoded JSON response.
+     * Issue an async HTTP GET and cooperatively wait for the response.
      *
-     * Runs inside a Fiber so that the HTTP request suspends the current
-     * context (not the worker) while waiting for the response, allowing the
-     * Workerman event loop to service other tasks.
+     * This is the canonical CLAUDE.md pattern: the async client is handed
+     * `success`/`error` callbacks that flip a shared `$state` flag, and the
+     * calling context spins a short poll loop that yields to the event loop
+     * (never a blocking `sleep()`) until the flag is set or the timeout
+     * budget is exhausted. The resolved {@see Response} (or null on
+     * transport error / timeout) is returned directly to the caller.
      *
-     * @param string $url        Full URL to request.
-     * @param string $cacheKey   Pre-computed cache key (md5 of URL).
+     * @param string $url Full URL to request.
      *
-     * @return mixed Decoded JSON or null on failure.
+     * @return Response|null The HTTP response, or null on transport error or
+     *     timeout.
      */
-    private function requestAsync(string $url, string $cacheKey): mixed
+    private function requestAndWait(string $url): ?Response
     {
-        $fiber = new CoroutineFiber(function () use ($url, $cacheKey): ?array {
-            $client = $this->getHttpClient();
+        $headers = [
+            self::CLIENT_ID_HEADER . ': ' . ($this->settings['client_id'] ?? ''),
+            'Accept: application/json',
+        ];
 
-            $headers = [
-                self::CLIENT_ID_HEADER . ': ' . $this->settings['client_id'],
-                'Accept: application/json',
-            ];
+        /** @var array<string, mixed> $options */
+        $options = [
+            'method'  => 'GET',
+            'headers' => $headers,
+            'timeout' => self::HTTP_TIMEOUT_SEC,
+        ];
 
-            $options = [
-                'headers' => $headers,
-                'timeout' => self::HTTP_TIMEOUT_SEC,
-            ];
+        if (($this->settings['use_ssl_verification'] ?? true) === false) {
+            $options['verify_ssl'] = false;
+        }
 
-            if (($this->settings['use_ssl_verification'] ?? true) === false) {
-                $options['verify_ssl'] = false;
-            }
+        /** @var array{done: bool, response: Response|null, error: \Throwable|null} $state */
+        $state = ['done' => false, 'response' => null, 'error' => null];
 
-            try {
-                /** @var mixed $rawResponse */
-                $rawResponse = $client->request($url, $options);
-                if (!$rawResponse instanceof Response) {
-                    return null;
-                }
+        $options['success'] = static function (mixed $response) use (&$state): void {
+            $state['response'] = $response instanceof Response ? $response : null;
+            $state['done'] = true;
+        };
+        $options['error'] = static function (mixed $error) use (&$state): void {
+            $state['error'] = $error instanceof \Throwable
+                ? $error
+                : new \RuntimeException('MAL HTTP transport error');
+            $state['done'] = true;
+        };
 
-                return $this->handleResponseObject($cacheKey, $rawResponse);
-            } catch (\Throwable) {
-                return null;
-            }
-        });
+        try {
+            $this->getHttpClient()->request($url, $options);
+        } catch (\Throwable $e) {
+            $this->logger?->debug('MAL API request threw: ' . $e->getMessage());
 
-        return $fiber->start();
+            return null;
+        }
+
+        // Cooperative wait — yields to the event loop so other tasks proceed
+        // while the response is in flight. Bounded by the request timeout plus
+        // a small grace so a lost callback can never wedge the worker.
+        $waited = 0.0;
+        $maxWait = (float) self::HTTP_TIMEOUT_SEC + 1.0;
+        while (!$state['done'] && $waited < $maxWait) {
+            ($this->waitTick)();
+            $waited += self::WAIT_INTERVAL_SEC;
+        }
+
+        if ($state['error'] !== null) {
+            $this->logger?->debug('MAL API transport error: ' . $state['error']->getMessage());
+
+            return null;
+        }
+
+        return $state['response'];
     }
 
     /**
      * Apply the status-inspection, back-off and cache-only-on-2xx policy to a
      * Workerman HTTP Response object.
      *
-     * This is the async-HTTP counterpart to {@see self::handleResponse()}. It
-     * reads the status code directly from the Response object and extracts the
-     * body string for JSON decoding. Retains all B5 semantics (429/503 back-off,
-     * non-2xx → null, JSON object cache validation).
+     * Called by {@see httpGetJson()} once {@see requestAndWait()} resolves a
+     * response. It reads the status code directly from the Response object and
+     * extracts the body string for JSON decoding. Retains all B5 semantics
+     * (429/503 back-off, non-2xx → null, JSON object cache validation).
      *
      * @param string    $cacheKey  In-memory cache key (md5 of URL).
      * @param Response  $response  Workerman HTTP Response object.
@@ -603,10 +663,14 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
 
     /**
      * Get or create the shared HTTP client instance.
+     *
+     * This is the lazy "connect" step: the client is built on first use (the
+     * first real API call), never at plugin-enable / worker-boot, keeping
+     * {@see onEnable()} free of any socket setup.
      */
     private function getHttpClient(): Client
     {
-        return $this->httpClient ??= new Client();
+        return $this->httpClient ??= new Client(['timeout' => self::HTTP_TIMEOUT_SEC]);
     }
 
     /**
@@ -636,8 +700,9 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * Sleep, if necessary, so consecutive API requests stay below the rate
      * limit and honour any recorded `Retry-After` back-off.
      *
-     * Uses Workerman's Timer::sleep() which yields to the event loop rather
-     * than blocking the worker (when a Fiber-based loop is active).
+     * Uses the injected sleep (Workerman's Timer::sleep() by default) so the
+     * pause yields to the event loop rather than blocking the worker under the
+     * Swoole runtime.
      *
      * @return void
      */

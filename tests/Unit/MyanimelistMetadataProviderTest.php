@@ -54,7 +54,9 @@ final class MyanimelistMetadataProviderTest extends TestCase
 
         $this->assertInstanceOf(MetadataSourceInterface::class, $provider);
         $this->assertSame('myanimelist', $provider->sourceName());
-        $this->assertSame(['anime'], $provider->supportedMediaTypes());
+        // anime is not a media_items.type ENUM member; MAL answers for the
+        // real stored types series + movie and matches by title.
+        $this->assertSame(['series', 'movie'], $provider->supportedMediaTypes());
     }
 
     public function test_metadata_source_lookups_return_empty_for_invalid_external_id(): void

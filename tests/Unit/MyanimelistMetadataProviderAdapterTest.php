@@ -175,7 +175,7 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
         $this->assertSame('myanimelist', $name);
         $this->assertInstanceOf(MyanimelistMetadataProviderAdapter::class, $registeredProvider);
         $this->assertInstanceOf(MetadataProviderInterface::class, $registeredProvider);
-        $this->assertSame(['anime'], $types);
+        $this->assertSame(['series', 'movie'], $types);
     }
 
     public function test_on_enable_registration_is_noop_when_manager_absent(): void

@@ -19,7 +19,7 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          coverage: none
+          coverage: pcov
           tools: composer:v2
 
       - name: Install dependencies
@@ -27,3 +27,17 @@ jobs:
 
       - name: Run PHPUnit
         run: vendor/bin/phpunit --colors=always
+
+      # phpunit.xml declares <report><cobertura outputFile="coverage.xml"/>, and
+      # setup-php provides pcov above, so ./coverage.xml is written by the run
+      # itself - no extra --coverage flag is needed.
+      - name: Upload coverage to Codacy
+        uses: codacy/codacy-coverage-reporter-action@v1
+        # Never allowed to fail the build: a missing/expired token or a Codacy
+        # outage must not turn CI red.
+        continue-on-error: true
+        # One upload only - both matrix legs produce an identical report.
+        if: matrix.php == '8.3'
+        with:
+          api-token: ${{ secrets.CODACY_API_TOKEN }}
+          coverage-reports: ./coverage.xml

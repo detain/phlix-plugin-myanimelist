@@ -11,18 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch to phlix-plugins catalog
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            await github.rest.repos.createDispatchEvent({
-              owner: "detain",
-              repo: "phlix-plugins",
-              event_type: "plugin-push",
-              client_payload: {
-                ref: context.ref,
-                sha: context.sha,
-                repo: context.repo
-              }
-            });
-
+        env:
+          GH_TOKEN: ${{ secrets.PHLIX_BOT_TOKEN }}
+        run: |
+          gh api repos/detain/phlix-plugins/dispatches \
+            --field event_type=plugin-push \
+            --field client_payload='{"ref":"${{ github.ref }}","sha":"${{ github.sha }}","repo":"${{ github.repository }}"}'

@@ -1284,6 +1284,34 @@ final class MyanimelistMetadataProviderTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+    // getImages (public, via direct call - coverage note)
+    // -------------------------------------------------------------------------
+    // NOTE: The provider's getImages() method calls adapter()->getImages(), but
+    // MyanimelistMetadataProviderAdapter is 'final' so it cannot be easily mocked
+    // or subclassed in tests. The inner loop (lines 349-366) is exercised
+    // indirectly through the adapter tests, but not directly in isolation.
+    // This is a known limitation given the final class constraint.
+
+    // -------------------------------------------------------------------------
+    // parseSearchResponse - non-numeric id case
+    // -------------------------------------------------------------------------
+
+    /**
+     * Test parseSearchResponse returns null when node id is present but not numeric.
+     * This exercises line 791 (is_numeric check in parseSearchResponse).
+     */
+    public function test_parse_search_response_returns_null_for_non_numeric_id(): void
+    {
+        $json = '{"data":[{"node":{"id":"not-a-number","title":"Bad ID"}}]}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        $result = $this->invokePrivate($this->makeProvider(), 'parseSearchResponse', [$decoded]);
+
+        $this->assertNull($result);
+    }
+
+    // -------------------------------------------------------------------------
     // adapter() (private, via reflection)
     // -------------------------------------------------------------------------
 

@@ -1582,6 +1582,172 @@ final class MyanimelistMetadataProviderTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+    // enforceRateLimit - second branch (no backoff, short elapsed time)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Test enforceRateLimit when elapsed time is less than the rate limit
+     * interval and there is no back-off. The method should sleep for the
+     * remaining time and update lastRequestTimestamp.
+     * This exercises lines 709-727 (the second branch of enforceRateLimit).
+     */
+    public function test_enforce_rate_limit_without_backoff_applies_delay(): void
+    {
+        $provider = $this->makeProvider();
+
+        $reflection = new \ReflectionClass($provider);
+
+        // Set lastRequestTimestamp to now (so elapsed will be ~0)
+        $lastReqProp = $reflection->getProperty('lastRequestTimestamp');
+        $lastReqProp->setAccessible(true);
+        $lastReqProp->setValue($provider, microtime(true));
+
+        // Track whether timerSleep was called
+        $sleepCalled = false;
+        $sleepDuration = 0.0;
+
+        $timerSleepProp = $reflection->getProperty('timerSleep');
+        $timerSleepProp->setAccessible(true);
+        $timerSleepProp->setValue($provider, static function (float $seconds) use (&$sleepCalled, &$sleepDuration): void {
+            $sleepCalled = true;
+            $sleepDuration = $seconds;
+        });
+
+        // Reset retryAfterUntil to 0 (no back-off)
+        $retryAfterProp = $reflection->getProperty('retryAfterUntil');
+        $retryAfterProp->setAccessible(true);
+        $retryAfterProp->setValue($provider, 0.0);
+
+        $this->invokePrivate($provider, 'enforceRateLimit', []);
+
+        $this->assertTrue($sleepCalled, 'timerSleep should have been called');
+        $this->assertEqualsWithDelta(1.0, $sleepDuration, 0.05, 'Should sleep for ~1 second (RATE_LIMIT_INTERVAL_SEC)');
+    }
+
+    // -------------------------------------------------------------------------
+    // getHttpClient - SSL verification enabled (default) path
+    // -------------------------------------------------------------------------
+
+    /**
+     * Test that when use_ssl_verification is not set to false (default),
+     * the verify_ssl option is NOT added to the request options ( Client
+     * defaults to SSL verification enabled).
+     * This exercises lines 671-673 and the default path of requestAndWait
+     * where use_ssl_verification is true/unset.
+     */
+    public function test_get_http_client_with_default_ssl_settings_does_not_disable_verification(): void
+    {
+        $capturedOptions = [];
+        $fakeClient = new class ($capturedOptions) extends \Workerman\Http\Client {
+            /** @var array */
+            private $captured;
+
+            public function __construct(array &$capture)
+            {
+                $this->captured = &$capture;
+            }
+
+            public function request(string $url, array $options = []): mixed
+            {
+                $this->captured = $options;
+                if (isset($options['success'])) {
+                    ($options['success'])(new \Workerman\Http\Response(200, [], '{}'));
+                }
+                return null;
+            }
+        };
+
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        $reflection = new \ReflectionClass($provider);
+        $httpClientProp = $reflection->getProperty('httpClient');
+        $httpClientProp->setAccessible(true);
+        $httpClientProp->setValue($provider, $fakeClient);
+
+        $noopFloat = $reflection->getProperty('timerSleep');
+        $noopFloat->setAccessible(true);
+        $noopFloat->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = $reflection->getProperty('waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
+
+        $this->invokePrivate($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
+
+        // verify_ssl should NOT be present (default is SSL verification enabled)
+        $this->assertArrayNotHasKey('verify_ssl', $capturedOptions, 'verify_ssl should not be set when using defaults');
+    }
+
+    // -------------------------------------------------------------------------
+    // fetchAnimeMetadata - when parseAnimeResponse returns null (no id)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Test fetchAnimeMetadata when the MAL API response is valid JSON but
+     * missing the 'id' field, causing parseAnimeResponse to return null.
+     * This exercises lines 406-417 and 937-947.
+     */
+    public function test_fetch_anime_metadata_returns_empty_when_response_missing_id(): void
+    {
+        $provider = new class(['client_id' => 'test-id']) extends MyanimelistMetadataProvider {
+            protected function httpGetJson(string $url): ?array
+            {
+                // Valid JSON but missing 'id' field - parseAnimeResponse returns null
+                return [
+                    'title'   => 'Test Anime',
+                    'mean'    => 8.5,
+                ];
+            }
+        };
+
+        $reflection = new \ReflectionClass($provider);
+        $method = $reflection->getMethod('fetchAnimeMetadata');
+        $method->setAccessible(true);
+
+        $result = $method->invoke($provider, 1);
+
+        $this->assertSame([], $result);
+    }
+
+    // -------------------------------------------------------------------------
+    // search - adapter result with missing optional fields
+    // -------------------------------------------------------------------------
+
+    /**
+     * Test search when the adapter returns a result with id and title but
+     * no overview or poster_path (the else branches at lines 319-324 are skipped).
+     * This exercises lines 309-329.
+     */
+    public function test_search_with_adapter_result_missing_optional_fields(): void
+    {
+        $provider = new class(['client_id' => 'test-id']) extends MyanimelistMetadataProvider {
+            protected function httpGetJson(string $url): ?array
+            {
+                if (str_contains($url, '/anime?q=')) {
+                    return [
+                        'data' => [['node' => ['id' => 999, 'title' => 'Test', 'alternative_titles' => []]]],
+                    ];
+                }
+                // Details - return data with no synopsis or main_picture
+                return [
+                    'id'    => 999,
+                    'title' => 'Test',
+                ];
+            }
+        };
+
+        $result = $provider->search('Test');
+
+        $this->assertCount(1, $result);
+        $this->assertSame('999', $result[0]['id']);
+        $this->assertSame('Test', $result[0]['title']);
+        $this->assertArrayNotHasKey('overview', $result[0]);
+        $this->assertArrayNotHasKey('poster_path', $result[0]);
+    }
+
+    // -------------------------------------------------------------------------
     // Fixtures
     // -------------------------------------------------------------------------
 

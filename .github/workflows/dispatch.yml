@@ -12,8 +12,10 @@ jobs:
     steps:
       - name: Dispatch to phlix-plugins catalog
         env:
-          GH_TOKEN: ${{ secrets.PHLIX_BOT_TOKEN}
+          GH_TOKEN: ${{ secrets.PHLIX_BOT_TOKEN }}
         run: |
-          gh api repos/detain/phlix-plugins/dispatches "
-          --field event_type=plugin-push 
-          --field client_payload='#{"ref":"${{ github.ref }}","sha":"${{ github.sha }}","repo":"${{ github.repository }}"}'
+          gh api repos/detain/phlix-plugins/dispatches \
+            --field event_type=plugin-push \
+            --field "client_payload[ref]=${{ github.ref }}" \
+            --field "client_payload[sha]=${{ github.sha }}" \
+            --field "client_payload[repo]=${{ github.repository }}"

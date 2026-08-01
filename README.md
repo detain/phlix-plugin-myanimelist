@@ -121,7 +121,14 @@ vendor/bin/phpunit --testdox  # verbose output
 ```
 
 The unit tests exercise the parse/map helpers via Reflection with fixture
-JSON — no live network calls are made.
+JSON — no live network calls are made; the HTTP paths covered by
+`tests/Unit/MyanimelistTransportTest.php` and
+`tests/Unit/MyanimelistMetadataProviderAdapterTest.php` run through anonymous
+`\Workerman\Http\Client` subclasses instead.
+
+`phpunit.xml` declares a Cobertura report, so a run with a coverage driver also
+writes `coverage.xml`; `.github/workflows/test.yml` runs the suite on PHP `8.3`
+and `8.4` and uploads that file to Codacy.
 
 ## License
 

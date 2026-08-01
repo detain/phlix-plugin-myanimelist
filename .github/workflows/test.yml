@@ -28,16 +28,10 @@ jobs:
       - name: Run PHPUnit
         run: vendor/bin/phpunit --colors=always
 
-      # phpunit.xml declares <report><cobertura outputFile="coverage.xml"/>, and
-      # setup-php provides pcov above, so ./coverage.xml is written by the run
-      # itself - no extra --coverage flag is needed.
+      # One upload only - both matrix legs produce an identical report.
       - name: Upload coverage to Codacy
-        uses: codacy/codacy-coverage-reporter-action@v1
-        # Never allowed to fail the build: a missing/expired token or a Codacy
-        # outage must not turn CI red.
-        continue-on-error: true
-        # One upload only - both matrix legs produce an identical report.
         if: matrix.php == '8.3'
+        uses: codacy/codacy-coverage-reporter-action@v1
         with:
-          api-token: ${{ secrets.CODACY_API_TOKEN }}
-          coverage-reports: ./coverage.xml
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          coverage-reports: coverage.xml

@@ -61,9 +61,70 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
                         return $response;
                     }
                 }
+                // No probe match — delegate to parent (uses injected fake HTTP client)
+                return parent::httpGetJson($url);
+            }
+        };
+
+        // Inject a fake HTTP client that matches probe URLs and returns canned responses
+        // (same pattern as MyanimelistTransportTest uses). Also noop the timer so
+        // enforceRateLimit() doesn't call Timer::sleep() which requires Workerman.
+        $fakeClient = new class ($probe) extends \Workerman\Http\Client {
+            /** @var array<string, array<string, mixed>|null> */
+            private array $probe;
+
+            /** @param array<string, array<string, mixed>|null> $probe */
+            public function __construct(array $probe)
+            {
+                // Deliberately skip parent::__construct() — real ctor builds ConnectionPool.
+                $this->probe = $probe;
+            }
+
+            public function request(string $url, array $options = []): mixed
+            {
+                foreach ($this->probe as $prefix => $response) {
+                    if (str_starts_with($url, $prefix)) {
+                        if ($response === null) {
+                            if (isset($options['error'])) {
+                                ($options['error'])(new \RuntimeException('probe error for ' . $url));
+                            }
+                            return null;
+                        }
+                        // Wrap probe data in a proper Response object with status 200
+                        $body = json_encode($response) ?: '{}';
+                        $statusCode = 200;
+                        $headers = ['Content-Type' => 'application/json'];
+                        $resp = new \Workerman\Http\Response($statusCode, $headers, $body);
+                        if (isset($options['success'])) {
+                            ($options['success'])($resp);
+                        }
+                        return null;
+                    }
+                }
+                if (isset($options['error'])) {
+                    ($options['error'])(new \RuntimeException('no probe for ' . $url));
+                }
                 return null;
             }
         };
+
+        // Inject the fake client via reflection. Use the parent class name for the
+        // private property since private properties are not inherited into the
+        // anonymous subclass's reflection context.
+        $httpClient = new \ReflectionProperty(MyanimelistMetadataProvider::class, 'httpClient');
+        $httpClient->setAccessible(true);
+        $httpClient->setValue($provider, $fakeClient);
+
+        // Noop the rate-limit sleep and cooperative-wait tick
+        $timerSleep = new \ReflectionProperty(MyanimelistMetadataProvider::class, 'timerSleep');
+        $timerSleep->setAccessible(true);
+        $timerSleep->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = new \ReflectionProperty(MyanimelistMetadataProvider::class, 'waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
 
         return $provider;
     }
@@ -213,5 +274,249 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
 
         $this->assertSame([], $provider->fetchAnimeMetadata(0));
         $this->assertSame([], $provider->fetchAnimeMetadata(-1));
+    }
+
+    // -------------------------------------------------------------------------
+    // stringOr (private static helper)
+    // -------------------------------------------------------------------------
+
+    /**
+     * @dataProvider stringOrProvider
+     */
+    public function test_string_or(mixed $value, string $fallback, string $expected): void
+    {
+        $reflection = new \ReflectionClass(MyanimelistMetadataProviderAdapter::class);
+        $method = $reflection->getMethod('stringOr');
+        $method->setAccessible(true);
+
+        $result = $method->invoke(null, $value, $fallback);
+
+        $this->assertSame($expected, $result);
+    }
+
+    /**
+     * @return array<string, array{mixed, string, string}>
+     */
+    public static function stringOrProvider(): array
+    {
+        return [
+            'non-empty string returns value' => ['hello', 'fallback', 'hello'],
+            'empty string returns fallback' => ['', 'fallback', 'fallback'],
+            'null returns fallback' => [null, 'fallback', 'fallback'],
+            'zero returns fallback' => [0, 'fallback', 'fallback'],
+            'false returns fallback' => [false, 'fallback', 'fallback'],
+            'int returns fallback' => [42, 'fallback', 'fallback'],
+            'whitespace only returns fallback' => ['   ', 'fallback', 'fallback'],
+        ];
+    }
+
+    // -------------------------------------------------------------------------
+    // parseMalId (private static helper)
+    // -------------------------------------------------------------------------
+
+    /**
+     * @dataProvider parseMalIdProvider
+     */
+    public function test_parse_mal_id(string $input, ?int $expected): void
+    {
+        $reflection = new \ReflectionClass(MyanimelistMetadataProviderAdapter::class);
+        $method = $reflection->getMethod('parseMalId');
+        $method->setAccessible(true);
+
+        $result = $method->invoke(null, $input);
+
+        $this->assertSame($expected, $result);
+    }
+
+    /**
+     * @return array<string, array{string, int|null}>
+     */
+    public static function parseMalIdProvider(): array
+    {
+        return [
+            'valid positive id' => ['1', 1],
+            'larger valid id' => ['12345', 12345],
+            'zero returns null' => ['0', null],
+            'negative returns null' => ['-1', null],
+            'empty string returns null' => ['', null],
+            'whitespace returns null' => ['  ', null],
+            'non-numeric returns null' => ['abc', null],
+            'mixed alphanumeric returns null' => ['123abc', null],
+            'float string returns null' => ['1.5', null],
+            'id with leading zeros' => ['007', 7],
+        ];
+    }
+
+    // -------------------------------------------------------------------------
+    // search edge cases
+    // -------------------------------------------------------------------------
+
+    public function test_search_when_fetch_anime_metadata_returns_empty_details(): void
+    {
+        // Provider returns MAL ID but no details
+        $provider = $this->makeProviderWithProbe([
+            'https://api.myanimelist.net/v2/anime?q=' => [
+                'data' => [['node' => ['id' => 42, 'title' => 'Trigun', 'alternative_titles' => []]]],
+            ],
+            '/v2/anime/42' => null, // fetch fails
+        ]);
+
+        $adapter = new MyanimelistMetadataProviderAdapter($provider);
+        $result = $adapter->search('Trigun');
+
+        // Should still return a usable stub with just id and title
+        $this->assertCount(1, $result);
+        $this->assertSame('42', $result[0]['id']);
+        $this->assertSame('Trigun', $result[0]['title']);
+        $this->assertArrayNotHasKey('overview', $result[0]);
+        $this->assertArrayNotHasKey('poster_path', $result[0]);
+    }
+
+    public function test_search_with_details_having_no_synopsis_or_poster(): void
+    {
+        // Details exist but have no overview or poster_path
+        $provider = $this->makeProviderWithProbe([
+            'https://api.myanimelist.net/v2/anime?q=' => [
+                'data' => [['node' => ['id' => 5, 'title' => 'Minimal Anime', 'alternative_titles' => []]]],
+            ],
+            '/v2/anime/5' => [
+                'id' => 5,
+                'title' => 'Minimal Anime',
+                'main_picture' => null,
+                'synopsis' => null,
+            ],
+        ]);
+
+        $adapter = new MyanimelistMetadataProviderAdapter($provider);
+        $result = $adapter->search('Minimal Anime');
+
+        $this->assertCount(1, $result);
+        $this->assertSame('5', $result[0]['id']);
+        $this->assertSame('Minimal Anime', $result[0]['title']);
+        $this->assertArrayNotHasKey('overview', $result[0]);
+        $this->assertArrayNotHasKey('poster_path', $result[0]);
+    }
+
+    // -------------------------------------------------------------------------
+    // getImages edge cases
+    // -------------------------------------------------------------------------
+
+    public function test_get_images_returns_empty_when_no_poster_or_fanart(): void
+    {
+        $provider = $this->makeProviderWithProbe([
+            '/v2/anime/10' => [
+                'id' => 10,
+                'title' => 'No Images Anime',
+                'main_picture' => null,
+                'poster_url' => null,
+                'fanart_url' => null,
+            ],
+        ]);
+
+        $adapter = new MyanimelistMetadataProviderAdapter($provider);
+        $result = $adapter->getImages('10');
+
+        $this->assertSame([], $result);
+    }
+
+    public function test_get_images_returns_poster_only_when_no_fanart(): void
+    {
+        // Probe must return raw MAL API format (main_picture, pictures) that
+        // fetchAnimeDetails parses via parseAnimeResponse, THEN mapToMetadataReturn
+        // transforms to poster_url/fanart_url.
+        $provider = $this->makeProviderWithProbe([
+            'https://api.myanimelist.net/v2/anime/11' => [
+                'id' => 11,
+                'title' => 'Poster Only',
+                'main_picture' => ['large' => 'https://example.com/poster.jpg'],
+                'pictures' => [],
+            ],
+        ]);
+
+        $adapter = new MyanimelistMetadataProviderAdapter($provider);
+        $result = $adapter->getImages('11');
+
+        $this->assertArrayHasKey('poster', $result);
+        $this->assertArrayNotHasKey('fanart', $result);
+        $this->assertSame('https://example.com/poster.jpg', $result['poster'][0]['url']);
+    }
+
+    public function test_get_images_returns_fanart_only_when_no_poster(): void
+    {
+        // Probe must return raw MAL API format - fanart comes from pictures[0].large
+        $provider = $this->makeProviderWithProbe([
+            'https://api.myanimelist.net/v2/anime/12' => [
+                'id' => 12,
+                'title' => 'Fanart Only',
+                'main_picture' => null,
+                'pictures' => [['large' => 'https://example.com/fanart.jpg', 'medium' => 'https://example.com/fanart-med.jpg']],
+            ],
+        ]);
+
+        $adapter = new MyanimelistMetadataProviderAdapter($provider);
+        $result = $adapter->getImages('12');
+
+        $this->assertArrayNotHasKey('poster', $result);
+        $this->assertArrayHasKey('fanart', $result);
+        $this->assertSame('https://example.com/fanart.jpg', $result['fanart'][0]['url']);
+    }
+
+    // -------------------------------------------------------------------------
+    // getDetails edge cases
+    // -------------------------------------------------------------------------
+
+    public function test_get_details_returns_metadata_when_fetch_succeeds(): void
+    {
+        // Probe must return raw MAL API format that fetchAnimeDetails parses
+        $provider = $this->makeProviderWithProbe([
+            'https://api.myanimelist.net/v2/anime/99' => [
+                'id' => 99,
+                'title' => 'Detailed Anime',
+                'main_picture' => ['large' => 'https://example.com/poster.jpg'],
+                'alternative_titles' => ['en' => 'Detailed Anime EN'],
+                'start_date' => '2020-04-03',
+                'synopsis' => 'A detailed synopsis.',
+                'mean' => 8.5,
+                'num_scoring_users' => 50000,
+                'genres' => [['id' => 1, 'name' => 'Action']],
+                'num_episodes' => 12,
+                'media_type' => 'tv',
+                'status' => 'finished_airing',
+                'studios' => [['id' => 1, 'name' => 'Studio A']],
+                'average_episode_duration' => 1200,
+            ],
+        ]);
+
+        $adapter = new MyanimelistMetadataProviderAdapter($provider);
+        $result = $adapter->getDetails('99');
+
+        $this->assertNotSame([], $result);
+        $this->assertSame('Detailed Anime', $result['title']);
+        $this->assertSame(8.5, $result['rating']);
+    }
+
+    // -------------------------------------------------------------------------
+    // onDisable via provider
+    // -------------------------------------------------------------------------
+
+    public function test_adapter_works_after_provider_on_disable(): void
+    {
+        $provider = $this->makeProviderWithProbe([
+            'https://api.myanimelist.net/v2/anime/1' => [
+                'id' => 1,
+                'title' => 'Test',
+                'main_picture' => ['large' => 'p.jpg'],
+                'pictures' => [],
+            ],
+        ]);
+
+        $adapter = new MyanimelistMetadataProviderAdapter($provider);
+
+        // Clear cache via onDisable
+        $provider->onDisable();
+
+        // Adapter should still work (it fetches fresh data)
+        $result = $adapter->getImages('1');
+        $this->assertArrayHasKey('poster', $result);
     }
 }

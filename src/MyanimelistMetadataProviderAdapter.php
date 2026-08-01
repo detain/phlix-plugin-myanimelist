@@ -210,6 +210,6 @@ final class MyanimelistMetadataProviderAdapter implements MetadataProviderInterf
      */
     private static function stringOr(mixed $value, string $fallback): string
     {
-        return (is_string($value) && $value !== '') ? $value : $fallback;
+        return (is_string($value) && trim($value) !== '') ? $value : $fallback;
     }
 }

@@ -807,6 +807,373 @@ final class MyanimelistMetadataProviderTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+    // setLogger
+    // -------------------------------------------------------------------------
+
+    public function test_set_logger_accepts_psr_logger(): void
+    {
+        $provider = $this->makeProvider();
+        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+
+        // Should not throw
+        $provider->setLogger($logger);
+        $this->assertTrue(true);
+    }
+
+    // -------------------------------------------------------------------------
+    // onDisable
+    // -------------------------------------------------------------------------
+
+    public function test_on_disable_clears_cache(): void
+    {
+        $provider = $this->makeProvider();
+
+        // Populate the cache via reflection
+        $reflection = new \ReflectionClass($provider);
+        $cacheProp = $reflection->getProperty('cache');
+        $cacheProp->setAccessible(true);
+        $cacheProp->setValue($provider, ['test' => ['data' => 'value']]);
+
+        $provider->onDisable();
+
+        $this->assertSame([], $cacheProp->getValue($provider));
+    }
+
+    // -------------------------------------------------------------------------
+    // scoreCandidateTitles (private helper)
+    // -------------------------------------------------------------------------
+
+    /**
+     * @dataProvider scoreCandidateTitlesProvider
+     */
+    public function test_score_candidate_titles(array $titles, string $queryLower, int $queryLen, int $expected): void
+    {
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreCandidateTitles', [$titles, $queryLower, $queryLen]);
+
+        $this->assertSame($expected, $result);
+    }
+
+    /**
+     * @return array<string, array{array<int, string>, string, int, int}>
+     */
+    public static function scoreCandidateTitlesProvider(): array
+    {
+        return [
+            'exact match returns -1' => [
+                ['One Piece', 'ONe PIece'],
+                'one piece',
+                9,
+                -1,
+            ],
+            'prefix match scores 800 minus length diff' => [
+                ['One Piece TV'],
+                'one piece',
+                9,
+                800 - 3, // title is 12, query is 9, diff is 3
+            ],
+            'prefix match longer title better' => [
+                ['One Piece anime', 'One Piece TV'],
+                'one piece',
+                9,
+                797, // 'One Piece TV' (12 chars): 800-3=797 beats 'One Piece anime' (13 chars): 800-4=796
+            ],
+            'contains match scores 600 minus length diff' => [
+                ['Dragon One Piece'],
+                'one piece',
+                9,
+                593, // title 16 vs query 9 = diff 7, so 600-7=593
+            ],
+            'no match returns 0' => [
+                ['Totally Different'],
+                'one piece',
+                9,
+                0,
+            ],
+            'empty titles returns 0' => [
+                [],
+                'one piece',
+                9,
+                0,
+            ],
+        ];
+    }
+
+    // -------------------------------------------------------------------------
+    // fetchAnimeDetails (private, via probe)
+    // -------------------------------------------------------------------------
+
+    public function test_fetch_anime_details_returns_null_on_http_failure(): void
+    {
+        // Build provider with probe that returns null (HTTP failure)
+        $provider = new class(['client_id' => 'test-id']) extends MyanimelistMetadataProvider {
+            protected function httpGetJson(string $url): ?array
+            {
+                return null;
+            }
+        };
+
+        $reflection = new \ReflectionClass($provider);
+        $method = $reflection->getMethod('fetchAnimeDetails');
+        $method->setAccessible(true);
+
+        $result = $method->invoke($provider, 1);
+        $this->assertNull($result);
+    }
+
+    public function test_fetch_anime_details_returns_parsed_response(): void
+    {
+        $expectedData = [
+            'id' => 5,
+            'title' => 'Test Anime',
+            'main_picture' => ['large' => 'large.jpg', 'medium' => 'med.jpg'],
+        ];
+
+        $provider = new class(['client_id' => 'test-id'], $expectedData) extends MyanimelistMetadataProvider {
+            private array $probeData;
+
+            public function __construct(array $settings, array $probeData)
+            {
+                parent::__construct($settings);
+                $this->probeData = $probeData;
+            }
+
+            protected function httpGetJson(string $url): ?array
+            {
+                return $this->probeData;
+            }
+        };
+
+        $reflection = new \ReflectionClass($provider);
+        $method = $reflection->getMethod('fetchAnimeDetails');
+        $method->setAccessible(true);
+
+        $result = $method->invoke($provider, 5);
+        $this->assertIsArray($result);
+        $this->assertSame(5, $result['id']);
+        $this->assertSame('Test Anime', $result['title']);
+    }
+
+    // -------------------------------------------------------------------------
+    // getHttpClient (private, via reflection)
+    // -------------------------------------------------------------------------
+
+    public function test_get_http_client_creates_client_on_first_call(): void
+    {
+        $provider = $this->makeProvider();
+
+        $reflection = new \ReflectionClass($provider);
+        $httpClientProp = $reflection->getProperty('httpClient');
+        $httpClientProp->setAccessible(true);
+
+        // Should be null initially
+        $this->assertNull($httpClientProp->getValue($provider));
+
+        $method = $reflection->getMethod('getHttpClient');
+        $method->setAccessible(true);
+
+        $client = $method->invoke($provider);
+
+        // Should now be a Client instance
+        $this->assertInstanceOf(\Workerman\Http\Client::class, $client);
+
+        // Second call should return same instance (cached)
+        $client2 = $method->invoke($provider);
+        $this->assertSame($client, $client2);
+    }
+
+    // -------------------------------------------------------------------------
+    // recordRetryAfterFromResponse (private)
+    // -------------------------------------------------------------------------
+
+    public function test_record_retry_after_from_response_parses_retry_after_header(): void
+    {
+        $provider = $this->makeProvider();
+
+        $reflection = new \ReflectionClass($provider);
+        $retryAfterProp = $reflection->getProperty('retryAfterUntil');
+        $retryAfterProp->setAccessible(true);
+        $retryAfterProp->setValue($provider, 0.0);
+
+        $method = $reflection->getMethod('recordRetryAfterFromResponse');
+        $method->setAccessible(true);
+
+        // Create a mock response with Retry-After header
+        $response = new \Workerman\Http\Response(200, ['Retry-After' => '5'], '');
+
+        $method->invoke($provider, $response);
+
+        $newValue = $retryAfterProp->getValue($provider);
+        $this->assertGreaterThan(microtime(true) + 4.0, $newValue);
+    }
+
+    public function test_record_retry_after_uses_default_when_no_retry_after_header(): void
+    {
+        $provider = $this->makeProvider();
+
+        $reflection = new \ReflectionClass($provider);
+        $retryAfterProp = $reflection->getProperty('retryAfterUntil');
+        $retryAfterProp->setAccessible(true);
+
+        $before = microtime(true);
+        $retryAfterProp->setValue($provider, 0.0);
+
+        $method = $reflection->getMethod('recordRetryAfterFromResponse');
+        $method->setAccessible(true);
+
+        // Response with no Retry-After header
+        $response = new \Workerman\Http\Response(200, [], '');
+
+        $method->invoke($provider, $response);
+
+        $newValue = $retryAfterProp->getValue($provider);
+        // Should be set to approximately before + RATE_LIMIT_INTERVAL_SEC (1.0)
+        $this->assertGreaterThanOrEqual($before + 0.9, $newValue);
+    }
+
+    public function test_record_retry_after_does_not_decrease_existing_backoff(): void
+    {
+        $provider = $this->makeProvider();
+
+        $reflection = new \ReflectionClass($provider);
+        $retryAfterProp = $reflection->getProperty('retryAfterUntil');
+        $retryAfterProp->setAccessible(true);
+
+        // Set a long backoff in the future
+        $longBackoff = microtime(true) + 100.0;
+        $retryAfterProp->setValue($provider, $longBackoff);
+
+        $method = $reflection->getMethod('recordRetryAfterFromResponse');
+        $method->setAccessible(true);
+
+        // Response with short Retry-After
+        $response = new \Workerman\Http\Response(200, ['Retry-After' => '1'], '');
+
+        $method->invoke($provider, $response);
+
+        // Should NOT have decreased the backoff
+        $this->assertSame($longBackoff, $retryAfterProp->getValue($provider));
+    }
+
+    // -------------------------------------------------------------------------
+    // lookup (public, comprehensive path testing)
+    // -------------------------------------------------------------------------
+
+    public function test_lookup_with_valid_filename_returns_metadata(): void
+    {
+        $detail = json_encode([
+            'id' => 1,
+            'title' => 'Cowboy Bebop',
+            'main_picture' => ['large' => 'https://cdn.myanimelist.net/poster-l.jpg'],
+            'alternative_titles' => ['en' => 'Cowboy Bebop', 'ja' => 'カウボーイビバップ'],
+            'start_date' => '1998-04-03',
+            'synopsis' => 'In the year 2071...',
+            'mean' => 8.75,
+            'num_scoring_users' => 900000,
+            'genres' => [['id' => 1, 'name' => 'Action'], ['id' => 24, 'name' => 'Sci-Fi']],
+            'num_episodes' => 26,
+            'media_type' => 'tv',
+            'status' => 'finished_airing',
+            'studios' => [['id' => 14, 'name' => 'Sunrise']],
+            'average_episode_duration' => 1440,
+        ], JSON_UNESCAPED_UNICODE) ?: '{}';
+
+        $searchResponse = new \Workerman\Http\Response(200, [], json_encode([
+            'data' => [['node' => ['id' => 1, 'title' => 'Cowboy Bebop', 'alternative_titles' => []]]],
+        ]) ?: '{}');
+        $detailResponse = new \Workerman\Http\Response(200, [], $detail);
+
+        // Build a provider that uses a fake HTTP client so no real network calls are made.
+        $provider = new class(['client_id' => 'test-id'], $searchResponse, $detailResponse) extends MyanimelistMetadataProvider {
+            private \Workerman\Http\Response $searchResponse;
+            private \Workerman\Http\Response $detailResponse;
+
+            public function __construct(array $settings, \Workerman\Http\Response $searchResponse, \Workerman\Http\Response $detailResponse)
+            {
+                parent::__construct($settings);
+                $this->searchResponse = $searchResponse;
+                $this->detailResponse = $detailResponse;
+            }
+
+            protected function httpGetJson(string $url): ?array
+            {
+                if (str_contains($url, '/anime?q=')) {
+                    // Search endpoint
+                    $body = $this->searchResponse->getBody()->getContents();
+                    /** @var mixed $decoded */
+                    $decoded = json_decode($body, true);
+                    return is_array($decoded) ? $decoded : null;
+                }
+                // Detail endpoint
+                $body = $this->detailResponse->getBody()->getContents();
+                /** @var mixed $decoded */
+                $decoded = json_decode($body, true);
+                return is_array($decoded) ? $decoded : null;
+            }
+        };
+
+        $result = $provider->lookup('/anime/Cowboy Bebop S01E01.mkv');
+
+        $this->assertNotSame([], $result);
+        $this->assertSame('Cowboy Bebop', $result['title']);
+        $this->assertSame(1, $result['mal_id']);
+    }
+
+    public function test_lookup_when_search_returns_no_results(): void
+    {
+        $provider = new class(['client_id' => 'test-id']) extends MyanimelistMetadataProvider {
+            protected function httpGetJson(string $url): ?array
+            {
+                return ['data' => []];
+            }
+        };
+
+        $result = $provider->lookup('/anime/Nonexistent_Anime_xyz123.mkv');
+
+        $this->assertSame([], $result);
+    }
+
+    // -------------------------------------------------------------------------
+    // adapter() (private, via reflection)
+    // -------------------------------------------------------------------------
+
+    public function test_adapter_returns_same_instance_on_repeated_calls(): void
+    {
+        $provider = $this->makeProvider();
+
+        $reflection = new \ReflectionClass($provider);
+        $method = $reflection->getMethod('adapter');
+        $method->setAccessible(true);
+
+        $adapter1 = $method->invoke($provider);
+        $adapter2 = $method->invoke($provider);
+
+        $this->assertSame($adapter1, $adapter2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Constructor - clock property
+    // -------------------------------------------------------------------------
+
+    public function test_constructor_sets_clock_closure(): void
+    {
+        $provider = $this->makeProvider();
+
+        $reflection = new \ReflectionClass($provider);
+        $clockProp = $reflection->getProperty('clock');
+        $clockProp->setAccessible(true);
+
+        $clock = $clockProp->getValue($provider);
+        $this->assertIsCallable($clock);
+
+        $before = microtime(true);
+        $time = $clock();
+        $after = microtime(true);
+
+        $this->assertGreaterThanOrEqual($before, $time);
+        $this->assertLessThanOrEqual($after, $time);
+    }
+
+    // -------------------------------------------------------------------------
     // Fixtures
     // -------------------------------------------------------------------------
 

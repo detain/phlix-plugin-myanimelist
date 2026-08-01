@@ -263,4 +263,250 @@ final class MyanimelistTransportTest extends TestCase
         $ref->setAccessible(true);
         $this->assertGreaterThan(0.0, $ref->getValue($provider), 'Retry-After back-off was not recorded');
     }
+
+    /**
+     * The error callback receives a non-Throwable and creates a RuntimeException.
+     * This exercises lines 586-590.
+     */
+    public function test_request_and_wait_error_callback_with_non_throwable(): void
+    {
+        $fakeClient = new class extends Client {
+            public function request(string $url, array $options = []): mixed
+            {
+                if (isset($options['error'])) {
+                    // Pass a non-Throwable value - should be wrapped in RuntimeException
+                    ($options['error'])('connection refused');
+                }
+                return null;
+            }
+        };
+
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        $ref = new \ReflectionClass($provider);
+        $httpClient = $ref->getProperty('httpClient');
+        $httpClient->setAccessible(true);
+        $httpClient->setValue($provider, $fakeClient);
+
+        $noopFloat = $ref->getProperty('timerSleep');
+        $noopFloat->setAccessible(true);
+        $noopFloat->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = $ref->getProperty('waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
+
+        $result = $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
+
+        // Should return null because error was recorded
+        $this->assertNull($result);
+    }
+
+    /**
+     * The HTTP request throws an exception - should be caught and return null.
+     * This exercises lines 593-598.
+     */
+    public function test_request_and_wait_returns_null_on_request_exception(): void
+    {
+        $fakeClient = new class extends Client {
+            public function request(string $url, array $options = []): mixed
+            {
+                throw new \RuntimeException('Connection refused');
+            }
+        };
+
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        $ref = new \ReflectionClass($provider);
+        $httpClient = $ref->getProperty('httpClient');
+        $httpClient->setAccessible(true);
+        $httpClient->setValue($provider, $fakeClient);
+
+        $noopFloat = $ref->getProperty('timerSleep');
+        $noopFloat->setAccessible(true);
+        $noopFloat->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = $ref->getProperty('waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
+
+        $result = $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
+
+        $this->assertNull($result);
+    }
+
+    /**
+     * The cooperative wait loop runs until maxWait is reached when callback
+     * never fires. This exercises lines 604-609.
+     * Note: With a no-op wait tick the loop runs fast but still exercises the code path.
+     */
+    public function test_request_and_wait_cooperative_wait_loop_timeout(): void
+    {
+        // A client that NEVER fires any callback - simulates a lost response
+        $fakeClient = new class extends Client {
+            public function request(string $url, array $options = []): mixed
+            {
+                // Simply do nothing - no success, no error callback
+                return null;
+            }
+        };
+
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        $ref = new \ReflectionClass($provider);
+        $httpClient = $ref->getProperty('httpClient');
+        $httpClient->setAccessible(true);
+        $httpClient->setValue($provider, $fakeClient);
+
+        $noopFloat = $ref->getProperty('timerSleep');
+        $noopFloat->setAccessible(true);
+        $noopFloat->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = $ref->getProperty('waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
+
+        $result = $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
+
+        // Should return null after timeout
+        $this->assertNull($result);
+    }
+
+    /**
+     * Test that use_ssl_verification setting adds verify_ssl option.
+     * This exercises line 576.
+     */
+    public function test_request_and_wait_disables_ssl_verification_when_setting_false(): void
+    {
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id', 'use_ssl_verification' => false]);
+
+        $ref = new \ReflectionClass($provider);
+        $httpClient = $ref->getProperty('httpClient');
+        $httpClient->setAccessible(true);
+
+        // Track the options that get passed to request()
+        $fakeClient = new class extends Client {
+            private array $capturedOptions = [];
+
+            public function request(string $url, array $options = []): mixed
+            {
+                $this->capturedOptions = $options;
+                if (isset($options['success'])) {
+                    ($options['success'])(new Response(200, [], '{}'));
+                }
+                return null;
+            }
+
+            public function getCapturedOptions(): array
+            {
+                return $this->capturedOptions;
+            }
+        };
+
+        $httpClient->setValue($provider, $fakeClient);
+
+        $noopFloat = $ref->getProperty('timerSleep');
+        $noopFloat->setAccessible(true);
+        $noopFloat->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = $ref->getProperty('waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
+
+        $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
+
+        $captured = $fakeClient->getCapturedOptions();
+        $this->assertArrayHasKey('verify_ssl', $captured);
+        $this->assertFalse($captured['verify_ssl']);
+    }
+
+    /**
+     * Test that HTTP request returns null on 503 (service unavailable).
+     * This exercises lines 642-648 (handleResponseObject returns null on non-2xx).
+     */
+    public function test_http_get_json_returns_null_on_503(): void
+    {
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(503, [], '{"error":"service_unavailable"}'),
+        ]);
+
+        $result = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+
+        $this->assertNull($result);
+    }
+
+    /**
+     * Test that handleResponseObject caches nothing on non-2xx.
+     * After a 503, a subsequent successful call should not return the error body.
+     */
+    public function test_http_get_json_does_not_cache_error_response(): void
+    {
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        $callCount = 0;
+        $fakeClient = new class ($callCount) extends Client {
+            private int $callCount = 0;
+            private int $responseIndex = 0;
+
+            public function __construct(int $initialCount)
+            {
+                $this->callCount = $initialCount;
+            }
+
+            public function request(string $url, array $options = []): mixed
+            {
+                $this->callCount++;
+                if ($this->responseIndex === 0) {
+                    // First call: 503 error
+                    $this->responseIndex++;
+                    if (isset($options['error'])) {
+                        ($options['error'])(new \RuntimeException('503'));
+                    }
+                } else {
+                    // Second call: success
+                    if (isset($options['success'])) {
+                        ($options['success'])(new Response(200, [], '{"id":1,"title":"Test"}'));
+                    }
+                }
+                return null;
+            }
+
+            public function getCallCount(): int
+            {
+                return $this->callCount;
+            }
+        };
+
+        $ref = new \ReflectionClass($provider);
+        $httpClient = $ref->getProperty('httpClient');
+        $httpClient->setAccessible(true);
+        $httpClient->setValue($provider, $fakeClient);
+
+        $noopFloat = $ref->getProperty('timerSleep');
+        $noopFloat->setAccessible(true);
+        $noopFloat->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = $ref->getProperty('waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
+
+        // First call returns 503 -> null
+        $result1 = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $this->assertNull($result1);
+
+        // Second call with same URL should make a fresh request (not cached error)
+        $result2 = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $this->assertNotNull($result2);
+        $this->assertSame(1, $result2['id']);
+    }
 }

@@ -151,6 +151,42 @@ final class MyanimelistMetadataProviderTest extends TestCase
         );
     }
 
+    /**
+     * registerWithMetadataManager is a no-op when manager exists in container
+     * but does not have the registerProvider method. This exercises lines 247-248.
+     */
+    public function test_register_with_metadata_manager_is_noop_when_manager_lacks_register_provider(): void
+    {
+        $managerClass = 'Phlix\\Media\\Metadata\\MetadataManager';
+
+        // A manager object that exists but lacks registerProvider method
+        $brokenManager = new class {
+            public function someOtherMethod(): void
+            {
+            }
+        };
+
+        $container = $this->createMock(ContainerInterface::class);
+        $container->method('has')
+            ->willReturnCallback(static fn (string $id): bool => $id === $managerClass);
+        $container->method('get')
+            ->willReturnCallback(static function (string $id) use ($managerClass, $brokenManager) {
+                if ($id === $managerClass) {
+                    return $brokenManager;
+                }
+                throw new \RuntimeException('unexpected container id: ' . $id);
+            });
+
+        $provider = $this->makeProvider();
+
+        $ref = new \ReflectionMethod($provider, 'registerWithMetadataManager');
+        $ref->setAccessible(true);
+
+        // Must not throw - should detect missing registerProvider and return early
+        $ref->invoke($provider, $container);
+        $this->assertTrue(true);
+    }
+
     public function test_lookup_returns_empty_for_unparseable_filename(): void
     {
         // 'S01E01' strips to '' (< 2 chars) → lookup short-circuits before any HTTP.
@@ -442,6 +478,47 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $this->assertSame(1, $result);
     }
 
+    /**
+     * scoreSearchResults handles non-array entries gracefully.
+     * This exercises lines 830-838 (skips non-array entries).
+     */
+    public function test_score_search_results_skips_non_array_entries(): void
+    {
+        // Mixed array with non-array entries interspersed
+        $decoded = [
+            'data' => [
+                'not an array', // line 830-831: not an array, skip
+                ['node' => ['id' => 1, 'title' => 'Valid Entry', 'alternative_titles' => []]],
+                123, // skip
+                false, // skip
+                ['node' => 'not an array'], // line 835-838: node not array, skip
+            ],
+        ];
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'Valid Entry']);
+
+        $this->assertSame(1, $result);
+    }
+
+    /**
+     * scoreSearchResults skips entries without id field.
+     * This exercises lines 840 (is_numeric check fails).
+     */
+    public function test_score_search_results_skips_entries_without_id(): void
+    {
+        $decoded = [
+            'data' => [
+                ['node' => ['title' => 'No ID', 'alternative_titles' => []]],
+                ['node' => ['id' => 'not numeric', 'title' => 'Bad ID', 'alternative_titles' => []]],
+                ['node' => ['id' => 5, 'title' => 'Good Entry', 'alternative_titles' => []]],
+            ],
+        ];
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$decoded, 'Good Entry']);
+
+        $this->assertSame(5, $result);
+    }
+
     // -------------------------------------------------------------------------
     // parseAnimeResponse
     // -------------------------------------------------------------------------
@@ -550,6 +627,43 @@ final class MyanimelistMetadataProviderTest extends TestCase
 
         $this->assertSame('m.jpg', $a['fanart_url']);
         $this->assertNull($b['fanart_url']);
+    }
+
+    /**
+     * extractFanartUrl returns null when first picture entry is not an array.
+     * This exercises lines 1068-1069.
+     */
+    public function test_extract_fanart_url_returns_null_for_non_array_first_entry(): void
+    {
+        $raw = [
+            'pictures' => [
+                'not an array',
+                ['large' => 'should-not-reach.jpg'],
+            ],
+        ];
+
+        $result = $this->invokePrivate($this->makeProvider(), 'extractFanartUrl', [$raw]);
+
+        $this->assertNull($result);
+    }
+
+    /**
+     * extractFanartUrl returns null when pictures array is empty after first entry
+     * that has no valid large/medium URL.
+     * This exercises lines 1072-1079.
+     */
+    public function test_extract_fanart_url_returns_null_when_no_valid_url_in_first_entry(): void
+    {
+        $raw = [
+            'pictures' => [
+                ['width' => 100, 'height' => 200], // no large or medium
+                ['large' => 'should-not-reach.jpg'],
+            ],
+        ];
+
+        $result = $this->invokePrivate($this->makeProvider(), 'extractFanartUrl', [$raw]);
+
+        $this->assertNull($result);
     }
 
     public function test_map_passes_through_fanart_url(): void
@@ -1128,6 +1242,43 @@ final class MyanimelistMetadataProviderTest extends TestCase
         };
 
         $result = $provider->lookup('/anime/Nonexistent_Anime_xyz123.mkv');
+
+        $this->assertSame([], $result);
+    }
+
+    /**
+     * findIdByTitle with an empty or whitespace-only string returns null.
+     * This exercises line 386-387.
+     */
+    public function test_find_id_by_title_returns_null_for_empty_string(): void
+    {
+        $provider = $this->makeProvider();
+
+        $this->assertNull($provider->findIdByTitle(''));
+        $this->assertNull($provider->findIdByTitle('   '));
+        $this->assertNull($provider->findIdByTitle("\t\n"));
+    }
+
+    /**
+     * lookup returns empty array when fetchAnimeDetails returns null
+     * (anime found by ID but details request fails).
+     * This exercises line 488-490.
+     */
+    public function test_lookup_returns_empty_when_fetch_anime_details_fails(): void
+    {
+        $provider = new class(['client_id' => 'test-id']) extends MyanimelistMetadataProvider {
+            protected function httpGetJson(string $url): ?array
+            {
+                if (str_contains($url, '/anime?q=')) {
+                    // Search returns an ID
+                    return ['data' => [['node' => ['id' => 1, 'title' => 'Test', 'alternative_titles' => []]]]];
+                }
+                // Details fails
+                return null;
+            }
+        };
+
+        $result = $provider->lookup('/anime/Test Anime S01E01.mkv');
 
         $this->assertSame([], $result);
     }

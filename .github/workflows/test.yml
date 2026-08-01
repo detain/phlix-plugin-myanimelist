@@ -28,10 +28,9 @@ jobs:
       - name: Run PHPUnit
         run: vendor/bin/phpunit --colors=always
 
-      # One upload only - both matrix legs produce an identical report.
       - name: Upload coverage to Codacy
-        if: matrix.php == '8.3'
         uses: codacy/codacy-coverage-reporter-action@v1
+        continue-on-error: true
         with:
-          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
-          coverage-reports: coverage.xml
+          api-token: ${{ secrets.CODACY_API_TOKEN }}
+          coverage-reports: ./coverage.xml

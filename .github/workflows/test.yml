@@ -33,3 +33,39 @@ jobs:
         with:
           api-token: ${{ secrets.CODACY_API_TOKEN }}
           coverage-reports: ./coverage.xml
+
+  # S246 — this repository had NO security audit gate at all. On 2026-08-06 a
+  # HIGH advisory (CVE-2026-67434, OS command injection, GHSA-hmqg-cxww-wqhq)
+  # landed against squizlabs/php_codesniffer and nothing here would ever have
+  # said so. The sibling repos that DID have a gate ran `composer audit --no-dev`,
+  # which drops every development dependency from the audited set and so could
+  # not fail on it either.
+  #
+  # This job audits the WHOLE lock — runtime and development — and prints the
+  # corpus it examined. Read scripts/security-audit-check.php for the policy and
+  # its reasoning.
+  #
+  # Do NOT add a development-dependency exclusion, do NOT add continue-on-error
+  # to the step below, and do NOT wrap it in a conditional: the guard test
+  # tests/Unit/SecurityAuditCheckTest.php parses this file and fails on each of those edits.
+  #
+  # Keep this job LAST in the file — that guard test slices the workflow from
+  # `composer-audit:` to the end and asserts the slice is not neutered.
+  composer-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+
+      # `--locked` audits composer.lock and needs no vendor/, so there is
+      # deliberately no `composer install` step here.
+      - name: Run Security Audit (runtime AND development dependencies)
+        run: php scripts/security-audit-check.php

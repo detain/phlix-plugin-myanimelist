@@ -130,6 +130,23 @@ JSON — no live network calls are made; the HTTP paths covered by
 writes `coverage.xml`; `.github/workflows/test.yml` runs the suite on PHP `8.3`
 and `8.4` and uploads that file to Codacy.
 
+## Security Audit
+
+`.github/workflows/test.yml` also runs a blocking `composer-audit` job that
+executes `scripts/security-audit-check.php`. It audits the whole lock — both
+`require` and `require-dev` — via `composer audit --locked --format=json`,
+labels each finding `[require]` or `[require-dev]`, and fails if the audited
+corpus drops below its floors:
+
+```bash
+php scripts/security-audit-check.php
+```
+
+There is no baseline file and no ignore list in the script; the only escape
+hatch is `config.audit.ignore` in `composer.json`, which the gate reports back
+as a loud IGNORED notice. `tests/Unit/SecurityAuditCheckTest.php` pins that
+policy shut.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).

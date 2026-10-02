@@ -34,6 +34,11 @@ jobs:
           api-token: ${{ secrets.CODACY_API_TOKEN }}
           coverage-reports: ./coverage.xml
 
+      # Level/paths mirror phpstan.neon (level 9, src). No PHPCS step: squizlabs
+      # is not in require-dev here, same as the anidb/this lineage's phpstan-only gate.
+      - name: Run PHPStan
+        run: vendor/bin/phpstan analyse src --level=9
+
   # S246 — this repository had NO security audit gate at all. On 2026-08-06 a
   # HIGH advisory (CVE-2026-67434, OS command injection, GHSA-hmqg-cxww-wqhq)
   # landed against squizlabs/php_codesniffer and nothing here would ever have

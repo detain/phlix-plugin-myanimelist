@@ -561,8 +561,8 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     private function requestAndWait(string $url): ?Response
     {
         $headers = [
-            self::CLIENT_ID_HEADER . ': ' . ($this->settings['client_id'] ?? ''),
-            'Accept: application/json',
+            self::CLIENT_ID_HEADER => (string) ($this->settings['client_id'] ?? ''),
+            'Accept' => 'application/json',
         ];
 
         /** @var array<string, mixed> $options */

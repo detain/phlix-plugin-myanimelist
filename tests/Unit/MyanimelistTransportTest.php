@@ -509,4 +509,80 @@ final class MyanimelistTransportTest extends TestCase
         $this->assertNotNull($result2);
         $this->assertSame(1, $result2['id']);
     }
+
+    /**
+     * C1 wire regression: the X-MAL-CLIENT-ID header must reach the serialized
+     * request under its REAL name.
+     *
+     * The vendored client (workerman/http-client v3.1.3 Request::end()) applies
+     * `options['headers']` with `foreach ($headers as $key => $value)
+     * withHeader($key, $value)`, and walkor/psr7 performs no header-name
+     * validation. A LIST-form header array therefore stores integer offsets as
+     * the header names, so Workerman\Psr7\str() emits junk lines such as
+     * `0: X-MAL-CLIENT-ID: <id>` and MAL never sees the client id at all —
+     * every production request shipped unauthenticated while the whole suite
+     * stayed green (no prior test exercised request assembly). This test drives
+     * the real requestAndWait(), then runs the captured options through the
+     * exact serialization path the vendored client uses, pinning the wire bytes.
+     */
+    public function test_request_and_wait_sends_client_id_header_under_its_real_name(): void
+    {
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        $fakeClient = new class extends Client {
+            private array $capturedOptions = [];
+
+            public function request(string $url, array $options = []): mixed
+            {
+                $this->capturedOptions = $options;
+                if (isset($options['success'])) {
+                    ($options['success'])(new Response(200, [], '{}'));
+                }
+                return null;
+            }
+
+            public function getCapturedOptions(): array
+            {
+                return $this->capturedOptions;
+            }
+        };
+
+        $ref = new \ReflectionClass($provider);
+        $httpClient = $ref->getProperty('httpClient');
+        $httpClient->setAccessible(true);
+        $httpClient->setValue($provider, $fakeClient);
+
+        $noopFloat = $ref->getProperty('timerSleep');
+        $noopFloat->setAccessible(true);
+        $noopFloat->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = $ref->getProperty('waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
+
+        $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
+
+        $captured = $fakeClient->getCapturedOptions();
+
+        // Shape law: options['headers'] must be a real-name => value map,
+        // never a list of pre-joined "Name: value" strings.
+        $this->assertSame([
+            'X-MAL-CLIENT-ID' => 'test-id',
+            'Accept' => 'application/json',
+        ], $captured['headers']);
+
+        // Wire law: serialize through the same path the vendored client takes
+        // (Request::end() withHeader loop + Workerman\Psr7\str()).
+        $request = new \Workerman\Psr7\Request('GET', 'https://api.myanimelist.net/v2/anime/1');
+        foreach ($captured['headers'] as $key => $value) {
+            $request->withHeader($key, $value);
+        }
+        $wire = \Workerman\Psr7\str($request);
+
+        $this->assertStringContainsString("\r\nX-MAL-CLIENT-ID: test-id\r\n", $wire);
+        $this->assertStringContainsString("\r\nAccept: application/json\r\n", $wire);
+        $this->assertStringNotContainsString("0: X-MAL-CLIENT-ID", $wire);
+    }
 }

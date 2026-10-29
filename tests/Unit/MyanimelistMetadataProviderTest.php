@@ -1625,15 +1625,16 @@ final class MyanimelistMetadataProviderTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // getHttpClient - SSL verification enabled (default) path
+    // requestAndWait - default path carries no request-level TLS option
     // -------------------------------------------------------------------------
 
     /**
-     * Test that when use_ssl_verification is not set to false (default),
-     * the verify_ssl option is NOT added to the request options ( Client
-     * defaults to SSL verification enabled).
-     * This exercises lines 671-673 and the default path of requestAndWait
-     * where use_ssl_verification is true/unset.
+     * Anti-phantom pin for the default path: the inert `verify_ssl` request
+     * option must never be emitted (workerman/http-client reads no such key).
+     * The TLS posture is owned solely by the client-constructor stream
+     * context — see MyanimelistTransportTest's dialed-connection pins; this
+     * test only proves request options stay free of the phantom key when
+     * use_ssl_verification is true/unset.
      */
     public function test_get_http_client_with_default_ssl_settings_does_not_disable_verification(): void
     {

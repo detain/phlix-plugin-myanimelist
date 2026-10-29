@@ -31,7 +31,9 @@ use Workerman\Timer;
  * - Client-ID authentication via the `X-MAL-CLIENT-ID` header
  * - Rate limiting — ~1 request/second to respect MAL's implicit limit
  * - In-memory response caching — identical URLs are fetched once per session
- * - Optional SSL verification toggle (`use_ssl_verification`) for self-hosted proxies
+ * - Optional SSL verification toggle (`use_ssl_verification`) for self-hosted
+ *   proxies — honored via the HTTP client's TLS stream context; when disabled
+ *   a warning is logged on client build (never silently unverified)
  * - Connectivity/credential check on enable (fails fast on a bad Client ID)
  * - Filename heuristics to extract a clean search query
  * - Poster (main_picture) + fanart (additional `pictures`) image extraction
@@ -59,6 +61,12 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * MAL API v2 base URL.
      */
     private const API_BASE = 'https://api.myanimelist.net/v2';
+
+    /**
+     * MAL API v2 hostname — the TLS peer identity pinned in the stream
+     * context built by {@see tlsContext()}.
+     */
+    private const API_HOST = 'api.myanimelist.net';
 
     /**
      * Header name carrying the MAL client ID on every request.
@@ -572,9 +580,11 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             'timeout' => self::HTTP_TIMEOUT_SEC,
         ];
 
-        if (($this->settings['use_ssl_verification'] ?? true) === false) {
-            $options['verify_ssl'] = false;
-        }
+        // TLS posture is NOT controlled here: workerman/http-client never
+        // reads a `verify_ssl` request option. The `use_ssl_verification`
+        // toggle is honored once, at the client/pool layer, by
+        // {@see getHttpClient()} — the only place the vendored
+        // ConnectionPool::create() actually consults (its `context` option).
 
         /** @var array{done: bool, response: Response|null, error: \Throwable|null} $state */
         $state = ['done' => false, 'response' => null, 'error' => null];
@@ -666,11 +676,63 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      *
      * This is the lazy "connect" step: the client is built on first use (the
      * first real API call), never at plugin-enable / worker-boot, keeping
-     * {@see onEnable()} free of any socket setup.
+     * {@see onEnable()} free of any socket setup. The TLS verification
+     * posture from `use_ssl_verification` is parsed HERE — the single point
+     * the vendored pool actually consults — and therefore stays fixed for the
+     * life of this provider instance (settings are constructor-injected).
+     *
+     * Disabling verification is logged as a warning: the credential-bearing
+     * HTTPS path silently loses peer authentication and must never go quiet.
      */
     private function getHttpClient(): Client
     {
-        return $this->httpClient ??= new Client(['timeout' => self::HTTP_TIMEOUT_SEC]);
+        if ($this->httpClient !== null) {
+            return $this->httpClient;
+        }
+
+        $verifyTls = ($this->settings['use_ssl_verification'] ?? true) !== false;
+        if ($verifyTls === false) {
+            $this->logger?->warning(
+                'MAL plugin: use_ssl_verification is disabled, so TLS certificate '
+                . 'verification is OFF for ' . self::API_HOST . ' requests. Only use '
+                . 'this behind a trusted self-hosted proxy; the X-MAL-CLIENT-ID '
+                . 'credential then crosses the network unauthenticated.'
+            );
+        }
+
+        return $this->httpClient = new Client([
+            'timeout' => self::HTTP_TIMEOUT_SEC,
+            'context' => self::tlsContext($verifyTls),
+        ]);
+    }
+
+    /**
+     * Build the complete `ssl` stream context for pooled HTTPS connections.
+     *
+     * workerman/http-client v3.1.3 ConnectionPool::create() defaults to
+     * `verify_peer => false, verify_peer_name => false, allow_self_signed =>
+     * true` and SHALLOW-merges a client-constructor `context` over those
+     * defaults, so the whole `ssl` section must be stated explicitly — a
+     * partial one would let the lax defaults be replaced by a sparser block
+     * and leave flags unset. `peer_name` is pinned to the MAL API host and
+     * SNI is sent explicitly because the vendor only auto-sets peer_name on
+     * proxy paths. Mirrors the estate idiom shipped for the same vendor
+     * family by phlix-hub (519c0c0) and phlix-plugin-anilist (983a6e7).
+     *
+     * @param bool $verifyTls True to enforce certificate verification, false
+     *     only for the documented self-hosted-proxy escape hatch.
+     *
+     * @return array{ssl: array<string, mixed>} A complete `ssl` stream context.
+     */
+    private static function tlsContext(bool $verifyTls): array
+    {
+        return ['ssl' => [
+            'verify_peer' => $verifyTls,
+            'verify_peer_name' => $verifyTls,
+            'allow_self_signed' => !$verifyTls,
+            'SNI_enabled' => true,
+            'peer_name' => self::API_HOST,
+        ]];
     }
 
     /**

@@ -379,53 +379,66 @@ final class MyanimelistTransportTest extends TestCase
     }
 
     /**
-     * Test that use_ssl_verification setting adds verify_ssl option.
-     * This exercises line 576.
+     * C32 anti-phantom law: request options must NEVER carry a `verify_ssl`
+     * key, with the toggle either way.
+     *
+     * The old code wrote `$options['verify_ssl'] = false` when
+     * `use_ssl_verification` was false — a key the vendored
+     * workerman/http-client never reads anywhere (see
+     * {@see test_vendored_transport_consumes_context_and_never_verify_ssl}),
+     * making the advertised control inert. The toggle is now honored at the
+     * client/pool layer via the TLS stream context, so the phantom request
+     * option is gone on BOTH paths; this pins that it can never return.
      */
-    public function test_request_and_wait_disables_ssl_verification_when_setting_false(): void
+    public function test_request_and_wait_never_carries_phantom_verify_ssl_option(): void
     {
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id', 'use_ssl_verification' => false]);
+        foreach ([[], ['use_ssl_verification' => false], ['use_ssl_verification' => true]] as $extra) {
+            $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id'] + $extra);
 
-        $ref = new \ReflectionClass($provider);
-        $httpClient = $ref->getProperty('httpClient');
-        $httpClient->setAccessible(true);
+            $ref = new \ReflectionClass($provider);
+            $httpClient = $ref->getProperty('httpClient');
+            $httpClient->setAccessible(true);
 
-        // Track the options that get passed to request()
-        $fakeClient = new class extends Client {
-            private array $capturedOptions = [];
+            // Track the options that get passed to request()
+            $fakeClient = new class extends Client {
+                private array $capturedOptions = [];
 
-            public function request(string $url, array $options = []): mixed
-            {
-                $this->capturedOptions = $options;
-                if (isset($options['success'])) {
-                    ($options['success'])(new Response(200, [], '{}'));
+                public function request(string $url, array $options = []): mixed
+                {
+                    $this->capturedOptions = $options;
+                    if (isset($options['success'])) {
+                        ($options['success'])(new Response(200, [], '{}'));
+                    }
+                    return null;
                 }
-                return null;
-            }
 
-            public function getCapturedOptions(): array
-            {
-                return $this->capturedOptions;
-            }
-        };
+                public function getCapturedOptions(): array
+                {
+                    return $this->capturedOptions;
+                }
+            };
 
-        $httpClient->setValue($provider, $fakeClient);
+            $httpClient->setValue($provider, $fakeClient);
 
-        $noopFloat = $ref->getProperty('timerSleep');
-        $noopFloat->setAccessible(true);
-        $noopFloat->setValue($provider, static function (float $s): void {
-        });
+            $noopFloat = $ref->getProperty('timerSleep');
+            $noopFloat->setAccessible(true);
+            $noopFloat->setValue($provider, static function (float $s): void {
+            });
 
-        $waitTick = $ref->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
-        });
+            $waitTick = $ref->getProperty('waitTick');
+            $waitTick->setAccessible(true);
+            $waitTick->setValue($provider, static function (): void {
+            });
 
-        $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
+            $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
 
-        $captured = $fakeClient->getCapturedOptions();
-        $this->assertArrayHasKey('verify_ssl', $captured);
-        $this->assertFalse($captured['verify_ssl']);
+            $captured = $fakeClient->getCapturedOptions();
+            $this->assertArrayNotHasKey(
+                'verify_ssl',
+                $captured,
+                'verify_ssl is an inert phantom option; TLS posture belongs to the client context'
+            );
+        }
     }
 
     /**
@@ -584,5 +597,167 @@ final class MyanimelistTransportTest extends TestCase
         $this->assertStringContainsString("\r\nX-MAL-CLIENT-ID: test-id\r\n", $wire);
         $this->assertStringContainsString("\r\nAccept: application/json\r\n", $wire);
         $this->assertStringNotContainsString("0: X-MAL-CLIENT-ID", $wire);
+    }
+
+    /**
+     * Build the provider's REAL lazily-constructed HTTP client and drive it
+     * through the vendored ConnectionPool::create() exactly as a pooled HTTPS
+     * dial would, returning the ssl stream context of the connection object
+     * the library actually hands to AsyncTcpConnection.
+     *
+     * This is the "REAL side" of the C32 advertised-vs-real bug class: the
+     * toggle no longer merely exists in plugin config, it must alter the
+     * context bytes the workerman pool merges over its insecure defaults and
+     * dials with. The address is loopback on the discard port (9) so no
+     * external network is touched; the async dial result is never awaited —
+     * only the constructed connection's context is asserted, then destroyed.
+     *
+     * @param array<string, mixed> $settings          Provider settings.
+     * @param \Psr\Log\LoggerInterface|null $logger   Optional spy, attached
+     *     before the client is built so warnings on the insecure path land.
+     *
+     * @return array<string, mixed> The ssl section of the dial context.
+     */
+    private function dialedSslContext(array $settings, ?\Psr\Log\LoggerInterface $logger = null): array
+    {
+        $provider = new MyanimelistMetadataProvider($settings);
+        if ($logger !== null) {
+            $provider->setLogger($logger);
+        }
+
+        $client = $this->invoke($provider, 'getHttpClient', []);
+
+        $poolProp = new \ReflectionProperty(Client::class, '_connectionPool');
+        $poolProp->setAccessible(true);
+        $pool = $poolProp->getValue($client);
+        $this->assertIsObject($pool);
+
+        $previousEvent = \Workerman\Worker::$globalEvent;
+        \Workerman\Worker::$globalEvent = new \Workerman\Events\Select();
+        try {
+            $create = new \ReflectionMethod($pool, 'create');
+            $create->setAccessible(true);
+            $connection = $create->invoke($pool, 'tcp://127.0.0.1:9', true, '');
+            $this->assertInstanceOf(\Workerman\Connection\AsyncTcpConnection::class, $connection);
+
+            $contextProp = new \ReflectionProperty(
+                \Workerman\Connection\AsyncTcpConnection::class,
+                'socketContext'
+            );
+            $contextProp->setAccessible(true);
+            /** @var array<string, mixed> $socketContext */
+            $socketContext = $contextProp->getValue($connection);
+
+            $connection->destroy();
+
+            return $socketContext;
+        } finally {
+            \Workerman\Worker::$globalEvent = $previousEvent;
+        }
+    }
+
+    /**
+     * C32 REAL-side regression pin: by default the dialed pooled connection
+     * carries a strict ssl context — certificate verification ON.
+     *
+     * The vendored ConnectionPool::create() defaults to verify_peer=false,
+     * verify_peer_name=false, allow_self_signed=true and only SHALLOW-merges
+     * the client constructor's `context` over them (the whole `ssl` section is
+     * replaced), so the plugin must supply a COMPLETE strict section for the
+     * control to reach the socket. Pre-fix this test is RED: the client was
+     * built with no context at all and every pooled MAL HTTPS connection —
+     * carrying the client_id credential — dialed unverified.
+     */
+    public function test_default_tls_setting_reaches_dialed_pooled_connection_as_strict_context(): void
+    {
+        $ssl = $this->dialedSslContext(['client_id' => 'test-id']);
+
+        $this->assertSame([
+            'ssl' => [
+                'verify_peer' => true,
+                'verify_peer_name' => true,
+                'allow_self_signed' => false,
+                'SNI_enabled' => true,
+                'peer_name' => 'api.myanimelist.net',
+            ],
+        ], $ssl);
+    }
+
+    /**
+     * C32 REAL-side regression pin: with use_ssl_verification=false the
+     * INSECURE context reaches the dialed pooled connection (documented
+     * self-hosted-proxy escape hatch) and the plugin logs a warning — the
+     * silent-inert-toggle class of bug can never return.
+     */
+    public function test_disabled_tls_setting_reaches_dialed_connection_as_insecure_context_and_warns(): void
+    {
+        $warnings = [];
+        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+        $logger->method('warning')->willReturnCallback(
+            static function (string|\Stringable $message) use (&$warnings): void {
+                $warnings[] = (string) $message;
+            }
+        );
+
+        $ssl = $this->dialedSslContext(
+            ['client_id' => 'test-id', 'use_ssl_verification' => false],
+            $logger
+        );
+
+        $this->assertSame([
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+                'allow_self_signed' => true,
+                'SNI_enabled' => true,
+                'peer_name' => 'api.myanimelist.net',
+            ],
+        ], $ssl, 'toggle=false must reach the dial as an explicit lax ssl section');
+
+        $this->assertCount(1, $warnings, 'disabling verification must log exactly one warning');
+        $this->assertStringContainsString('use_ssl_verification', $warnings[0]);
+    }
+
+    /**
+     * C32 root-cause tripwire over the locked vendor package: the string
+     * `verify_ssl` appears nowhere in workerman/http-client (why the old
+     * request option was inert), while the client-constructor `context` the
+     * fix now uses is genuinely consumed by ConnectionPool::create().
+     * If a future vendor bump introduces `verify_ssl`, this reddens on
+     * purpose to force a re-review of where the toggle belongs.
+     */
+    public function test_vendored_transport_consumes_context_and_never_verify_ssl(): void
+    {
+        $srcDir = dirname(__DIR__, 2) . '/vendor/workerman/http-client/src';
+        $this->assertDirectoryIsReadable($srcDir);
+
+        $files = glob($srcDir . '/*.php');
+        $this->assertIsArray($files);
+        $this->assertNotEmpty($files, 'no workerman/http-client sources found to scan');
+
+        $poolSeen = false;
+        foreach ($files as $file) {
+            $source = file_get_contents($file);
+            $this->assertIsString($source);
+            $this->assertStringNotContainsString(
+                'verify_ssl',
+                $source,
+                "library read-path changed: $file now mentions verify_ssl"
+            );
+            if (basename($file) === 'ConnectionPool.php') {
+                $poolSeen = true;
+                $this->assertStringContainsString(
+                    "\$this->options['context']",
+                    $source,
+                    'ConnectionPool must still consume the client-constructor context option'
+                );
+                $this->assertStringContainsString(
+                    "'verify_peer' => false",
+                    $source,
+                    'ConnectionPool insecure default moved - re-verify the plugin strict override'
+                );
+            }
+        }
+        $this->assertTrue($poolSeen, 'ConnectionPool.php missing from the scan set');
     }
 }

@@ -29,7 +29,41 @@ jobs:
         run: vendor/bin/phpunit --colors=always
 
       - name: Upload coverage to Codacy
-        uses: codacy/codacy-coverage-reporter-action@v1
+        # M-MAL-01 (review mal__devops, 2026-10-29). This upload was GREEN at
+        # 9e7815c (Oct 20: "Coverage data uploaded. Coverage received
+        # successfully.") and RED at 91f6f9a (Oct 29: api.codacy.com rejects the
+        # POST with "Failed to create coverage: No Write permission on Project";
+        # the reporter exhausts retries and the step exits 1, failing the whole
+        # phpunit matrix and cancelling the 8.4 leg). Nothing repo-side moved
+        # between those runs: same workflow posture, @v1 resolved to the same
+        # action commit both times, reporter binary 14.1.3 with identical
+        # checksum, and the CODACY_API_TOKEN secret is unchanged since
+        # 2026-07-27. The authorization flipped SERVER-side (Codacy's write
+        # grant for this project — project token scope or the Codacy
+        # GitHub-App's repo access). A workflow `permissions:` block therefore
+        # cannot fix it: that block governs GITHUB_TOKEN, which this call does
+        # not use; and a secret-presence gate is vacuous — the secret is
+        # present, it simply no longer authorizes writes.
+        #
+        # Cure: a fail-closed enable switch. The step renders as SKIPPED — an
+        # honest, unmistakable "this check is off" — rather than running on
+        # every push to fail into a warning annotation nobody reads
+        # (continue-on-error is exactly the silent-misreport masking this
+        # review names; rejected). OWNER half, in order: restore Codacy write
+        # access (github.com/settings/installations -> Codacy -> confirm this
+        # repo is still granted; app.codacy.com -> project -> settings ->
+        # project API token -> update the CODACY_API_TOKEN repo secret), then
+        # set the repository custom variable CODACY_COVERAGE_ENABLED=true to
+        # re-arm. With the switch on, any renewed failure goes red on purpose.
+        # If the owner decides Codacy is not worth keeping, delete this step
+        # outright — no gate here depends on it.
+        #
+        # The floating @v1 is pinned to the full SHA per the estate action-pin
+        # law (cf6edd3 lineage; mirrors anidb's committed posture); 89d6c85 is
+        # the exact commit @v1 already resolved to on both the green and red
+        # runs, so the pin moves zero behavior.
+        uses: codacy/codacy-coverage-reporter-action@89d6c85cfafaec52c72b6c5e8b2878d33104c699
+        if: ${{ vars.CODACY_COVERAGE_ENABLED == 'true' }}
         with:
           api-token: ${{ secrets.CODACY_API_TOKEN }}
           coverage-reports: ./coverage.xml

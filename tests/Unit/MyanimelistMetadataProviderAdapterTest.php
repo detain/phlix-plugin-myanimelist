@@ -165,6 +165,38 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
         $this->assertSame([], $adapter->search('Nobody'));
     }
 
+    /**
+     * M-14 (minors lane W-min73): non-positive-ID boundary. MAL IDs are
+     * 1-based, and the provider scorer now rejects junk nodes, so an ID of
+     * 0 can only arrive from a stubbed/mocked provider — yet the adapter must
+     * not emit such a row: the host would hand "0" straight back to
+     * getDetails(), where parseMalId() rejects it (a non round-trippable
+     * result). Refuse at the boundary, before enrichment is even attempted.
+     */
+    public function test_search_refuses_non_positive_id_from_provider(): void
+    {
+        $provider = new class (['client_id' => 'test-id']) extends MyanimelistMetadataProvider {
+            public bool $fetchCalled = false;
+
+            public function findIdByTitle(string $title): ?int
+            {
+                return 0;
+            }
+
+            public function fetchAnimeMetadata(int $malId): array
+            {
+                $this->fetchCalled = true;
+
+                return [];
+            }
+        };
+
+        $adapter = new MyanimelistMetadataProviderAdapter($provider);
+
+        $this->assertSame([], $adapter->search('Anything'));
+        $this->assertFalse($provider->fetchCalled, 'a non-positive id must be refused before enrichment');
+    }
+
     public function test_get_details_with_invalid_external_id_returns_empty(): void
     {
         $provider = $this->makeProviderWithProbe([]);

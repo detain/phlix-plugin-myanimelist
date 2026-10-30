@@ -340,9 +340,11 @@ final class MyanimelistTransportTest extends TestCase
     }
 
     /**
-     * The cooperative wait loop runs until maxWait is reached when callback
-     * never fires. This exercises lines 604-609.
-     * Note: With a no-op wait tick the loop runs fast but still exercises the code path.
+     * The cooperative wait loop runs until its WALL-CLOCK budget is exhausted
+     * when a callback never fires. This exercises the lost-callback guard and
+     * pins that the bound is measured in real seconds (injected stepping
+     * clock), not tick counts: a runtime that coalesces or fast-forwards
+     * ticks must never stretch the wedge-protection window.
      */
     public function test_request_and_wait_cooperative_wait_loop_timeout(): void
     {
@@ -367,15 +369,31 @@ final class MyanimelistTransportTest extends TestCase
         $noopFloat->setValue($provider, static function (float $s): void {
         });
 
+        // Stepping wall clock: every tick advances injected "reality" by 2s,
+        // so the HTTP_TIMEOUT_SEC + 1 budget (11s) expires after a pinned,
+        // deterministic number of ticks — with ZERO real waiting.
+        $now = 0.0;
+        $ticks = 0;
+
+        $clock = $ref->getProperty('clock');
+        $clock->setAccessible(true);
+        $clock->setValue($provider, static function () use (&$now): float {
+            return $now;
+        });
+
         $waitTick = $ref->getProperty('waitTick');
         $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $waitTick->setValue($provider, static function () use (&$now, &$ticks): void {
+            $ticks++;
+            $now += 2.0;
         });
 
         $result = $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
 
         // Should return null after timeout
         $this->assertNull($result);
+        // ceil(11 / 2) = 6 ticks: budget is wall-clock seconds, not tick counts.
+        $this->assertSame(6, $ticks, 'wait loop must stop exactly at the wall-clock deadline');
     }
 
     /**
@@ -1090,5 +1108,192 @@ final class MyanimelistTransportTest extends TestCase
             $this->assertStringNotContainsString('SECRET-BODY-MARKER', $records[0][1], 'body bytes never reach the log');
             $this->assertStringNotContainsString('SECRET-HEADER-MARKER', $records[0][1], 'header values never reach the log');
         }
+    }
+
+    /**
+     * M-08 (minors lane W-min73): transport exception messages are composed
+     * from REMOTE bytes — the vendored Request::onMessage throws
+     * `Invalid response string: <start-line>` and unexpected-close errors
+     * embed the peer address. Their getMessage() must never enter the log raw:
+     * control characters (NUL, ESC sequences, CR/LF beyond the logger's own
+     * line break) would enable terminal/log injection for whoever tails the
+     * file. Scrub to printable ASCII, cap the length, keep the diagnosis.
+     *
+     * @dataProvider dirtyTransportExceptionProvider
+     */
+    public function test_transport_exception_messages_are_scrubbed_before_logging(string $dirty, string $marker): void
+    {
+        /** @var list<array{0: string, 1: string}> $records */
+        $records = [];
+
+        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+        $logger->method('debug')->willReturnCallback(
+            /** @param mixed $message */
+            static function ($message) use (&$records): void {
+                $records[] = ['debug', (string) $message];
+            }
+        );
+
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        // Two failure vectors reach requestAndWait(): an exception thrown
+        // synchronously out of Client::request(), and the async `error`
+        // callback the transport fires on a broken connection. Both must scrub.
+        $fakeClient = new class ($dirty) extends Client {
+            public bool $resolveError = false;
+
+            public function __construct(private string $dirty)
+            {
+            }
+
+            public function request(string $url, array $options = []): mixed
+            {
+                if ($this->resolveError) {
+                    ($options['error'])(new \RuntimeException($this->dirty));
+
+                    return null;
+                }
+
+                throw new \RuntimeException($this->dirty);
+            }
+        };
+
+        $ref = new \ReflectionClass($provider);
+
+        $httpClient = $ref->getProperty('httpClient');
+        $httpClient->setAccessible(true);
+        $httpClient->setValue($provider, $fakeClient);
+
+        // Vector 1: synchronous throw from request().
+        $provider->setLogger($logger);
+        $this->assertNull($this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']));
+
+        // Vector 2: the transport fires the installed `error` callback.
+        $fakeClient->resolveError = true;
+        $recordsBefore = count($records);
+        $this->assertNull($this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']));
+
+        $this->assertGreaterThan($recordsBefore, $records, 'the error vector must also log');
+
+        foreach ($records as [$level, $message]) {
+            $this->assertSame('debug', $level);
+            $this->assertStringContainsString($marker, $message, 'the diagnosis text survives the scrub');
+            $this->assertSame(
+                0,
+                preg_match('/[^\x20-\x7E]/', $message),
+                'no control/ESC/NUL/CR/LF bytes may reach the log'
+            );
+            $this->assertLessThanOrEqual(
+                // Whichever of the two failure vectors logged, the scrubbed
+                // payload is capped at 200; add the LONGER of the two prefixes.
+                max(strlen('MAL API request threw: '), strlen('MAL API transport error: ')) + 200,
+                strlen($message),
+                'the scrubbed message must be length-capped'
+            );
+        }
+
+        // The two vectors must be distinguishable at the prefix.
+        $this->assertStringContainsString('MAL API request threw: ', $records[0][1]);
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: string}>
+     */
+    public static function dirtyTransportExceptionProvider(): array
+    {
+        return [
+            'malformed start-line' => [
+                "Invalid response string: HTTP/1.1\x1b[31m\x00\r\nMARKER-OK" . str_repeat('Y', 300),
+                'MARKER-OK',
+            ],
+            'peer-address close' => [
+                "connection closed by 10.9.8.7:9999\x1b[J\x00 PEER-CLOSE-MARKER",
+                'PEER-CLOSE-MARKER',
+            ],
+        ];
+    }
+
+    /**
+     * M-17 (minors lane W-min73): RFC 9110 allows Retry-After as either delta
+     * seconds OR an HTTP-date. The delta branch was pinned by the majors era;
+     * the date branch must record the DISTANCE from now to the named instant
+     * (never the raw epoch timestamp), clamp into [0, MAX_RETRY_AFTER_SEC],
+     * and fall back to the safe 1.0s default for past dates and garbage.
+     */
+    public function test_retry_after_http_date_records_distance_to_named_instant(): void
+    {
+        $when = (new \DateTimeImmutable('now +90 seconds', new \DateTimeZone('UTC')))
+            ->format(\DateTimeInterface::RFC7231);
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(429, ['Retry-After' => $when], '{}'),
+        ]);
+
+        $this->assertNull($this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']));
+
+        $until = $this->retryAfterUntil($provider);
+        $now = microtime(true);
+
+        $this->assertGreaterThan($now + 80.0, $until, 'the ~90s distance must be honored');
+        $this->assertLessThan($now + 100.0, $until, 'never the raw epoch timestamp (that would be ~1.8e9)');
+    }
+
+    public function test_retry_after_http_date_in_the_past_uses_default_interval(): void
+    {
+        $when = (new \DateTimeImmutable('now -3600 seconds', new \DateTimeZone('UTC')))
+            ->format(\DateTimeInterface::RFC7231);
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(429, ['Retry-After' => $when], '{}'),
+        ]);
+
+        $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+
+        $until = $this->retryAfterUntil($provider);
+        $now = microtime(true);
+
+        $this->assertGreaterThan($now, $until, 'the safe default back-off is still armed');
+        $this->assertLessThan($now + 5.0, $until, 'a released window must not park past the default');
+    }
+
+    public function test_retry_after_http_date_far_future_is_clamped_to_the_cap(): void
+    {
+        $when = (new \DateTimeImmutable('now +99999 seconds', new \DateTimeZone('UTC')))
+            ->format(\DateTimeInterface::RFC7231);
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(429, ['Retry-After' => $when], '{}'),
+        ]);
+
+        $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+
+        $until = $this->retryAfterUntil($provider);
+        $now = microtime(true);
+
+        $this->assertGreaterThan($now + 295.0, $until);
+        $this->assertLessThan($now + 305.0, $until, 'hostile far-future dates cannot park the worker past the 300s cap');
+    }
+
+    public function test_retry_after_unparseable_value_uses_default_interval(): void
+    {
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(429, ['Retry-After' => 'notadate'], '{}'),
+        ]);
+
+        $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+
+        $until = $this->retryAfterUntil($provider);
+        $now = microtime(true);
+
+        $this->assertGreaterThan($now, $until);
+        $this->assertLessThan($now + 5.0, $until);
+    }
+
+    private function retryAfterUntil(MyanimelistMetadataProvider $provider): float
+    {
+        $prop = new \ReflectionProperty($provider, 'retryAfterUntil');
+        $prop->setAccessible(true);
+
+        /** @var float $value */
+        $value = $prop->getValue($provider);
+
+        return $value;
     }
 }

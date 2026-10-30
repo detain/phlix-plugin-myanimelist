@@ -93,6 +93,179 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $this->assertNull($prop->getValue($provider), 'construction never builds the HTTP client');
     }
 
+    // -------------------------------------------------------------------------
+    // M-09 (minors lane W-min73): client_id must be header-safe printable ASCII
+    // -------------------------------------------------------------------------
+
+    /**
+     * @return array<string, array{array<string, mixed>}>
+     */
+    public static function unsafeClientIdProvider(): array
+    {
+        return [
+            'CRLF injection'   => [['client_id' => "abc\r\nX-Injected: yes"]],
+            'bare newline'     => [['client_id' => "abc\ndef"]],
+            'interior space'   => [['client_id' => 'abc def']],
+            'NUL byte'         => [['client_id' => "abc\x00def"]],
+            'ESC sequence'     => [['client_id' => "abc\x1b[31mdef"]],
+            'non-ASCII UTF-8'  => [['client_id' => 'abcデef']],
+        ];
+    }
+
+    /**
+     * The value is sent verbatim as the X-MAL-CLIENT-ID header, so control
+     * bytes (CR/LF above all — a header-injection primitive), spaces and
+     * non-ASCII must be refused at the constructor, not laundered into the
+     * wire. The raw value is checked: trimming first would hide the CR/LF.
+     *
+     * @dataProvider unsafeClientIdProvider
+     * @param array<string, mixed> $settings
+     */
+    public function test_constructor_throws_on_unsafe_client_id_charset(array $settings): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('printable ASCII');
+
+        new MyanimelistMetadataProvider($settings);
+    }
+
+    /**
+     * Control: a realistic punctuation-bearing id constructs.
+     */
+    public function test_constructor_accepts_printable_ascii_client_id_control(): void
+    {
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'M-a_9!x']);
+
+        $this->assertInstanceOf(MyanimelistMetadataProvider::class, $provider);
+    }
+
+    // -------------------------------------------------------------------------
+    // M-14 (minors lane W-min73): unusable MAL ids never surface as 0
+    // -------------------------------------------------------------------------
+
+    /**
+     * A node whose id is non-numeric cannot be fetched; scoring it and then
+     * early-returning its laundered 0 (exact-match fast path) used to hand
+     * "found anime #0" to callers. It must be skipped outright and the next
+     * usable candidate win.
+     */
+    public function test_score_search_results_skips_exact_match_with_non_numeric_id(): void
+    {
+        $response = [
+            'data' => [
+                ['node' => ['id' => 'not-a-number', 'title' => 'Steins Gate']],
+                ['node' => ['id' => 55, 'title' => 'Steins Gate 0']],
+            ],
+        ];
+
+        $result = $this->invokePrivate($this->makeProvider(), 'scoreSearchResults', [$response, 'Steins Gate']);
+
+        // Junk node dropped; 55's title is a prefix-of-query continuation,
+        // so it wins on score — and the return is a REAL id, never 0.
+        $this->assertNotNull($result);
+        $this->assertGreaterThan(0, $result);
+    }
+
+    /**
+     * @return array<string, array{array<string, mixed>}>
+     */
+    public static function unusableAnimeIdProvider(): array
+    {
+        return [
+            'string junk id' => [['id' => 'abc', 'title' => 'X']],
+            'zero id'        => [['id' => 0, 'title' => 'X']],
+            'negative id'    => [['id' => -5, 'title' => 'X']],
+        ];
+    }
+
+    /**
+     * parseAnimeResponse's docblock has always promised "null when there is
+     * no usable ID" — until now only a *missing* id honored it; junk ids were
+     * laundered to 0 and shipped downstream.
+     *
+     * @dataProvider unusableAnimeIdProvider
+     * @param array<string, mixed> $raw
+     */
+    public function test_parse_anime_response_returns_null_for_unusable_id(array $raw): void
+    {
+        $this->assertNull($this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$raw]));
+    }
+
+    // -------------------------------------------------------------------------
+    // M-15 (minors lane W-min73): empty-string artwork must fall back
+    // -------------------------------------------------------------------------
+
+    /**
+     * MAL can return `main_picture: {large: "", medium: "url"}`; the empty
+     * string previously beat the `??` fallback chain, producing a blank
+     * poster downstream (poster_url = '' is "has poster" to the host).
+     */
+    public function test_parse_anime_response_falls_back_past_empty_picture_sizes(): void
+    {
+        $raw = [
+            'id'           => 21,
+            'title'        => 'One Piece',
+            'main_picture' => ['large' => '', 'medium' => 'https://cdn/medium.jpg'],
+        ];
+
+        $parsed = $this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$raw]);
+
+        $this->assertIsArray($parsed);
+        $this->assertSame('https://cdn/medium.jpg', $parsed['poster_url']);
+    }
+
+    /**
+     * Both sizes empty => poster is null ("no artwork"), not an empty string.
+     */
+    public function test_parse_anime_response_treats_all_empty_pictures_as_absent(): void
+    {
+        $raw = [
+            'id'           => 21,
+            'title'        => 'One Piece',
+            'main_picture' => ['large' => '', 'medium' => ''],
+        ];
+
+        $parsed = $this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$raw]);
+
+        $this->assertIsArray($parsed);
+        $this->assertNull($parsed['poster_url']);
+    }
+
+    /**
+     * Same class of leak in the genre loop: an empty genre name becomes a
+     * selectable-but-blank chip; it must be dropped.
+     */
+    public function test_parse_anime_response_drops_empty_genre_names(): void
+    {
+        $raw = [
+            'id'     => 21,
+            'title'  => 'One Piece',
+            'genres' => [['id' => 1, 'name' => ''], ['id' => 2, 'name' => 'Action']],
+        ];
+
+        $parsed = $this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$raw]);
+
+        $this->assertIsArray($parsed);
+        $this->assertSame(['Action'], $parsed['genres']);
+    }
+
+    // -------------------------------------------------------------------------
+    // M-19 (minors lane W-min73): dangling separator after episode strip
+    // -------------------------------------------------------------------------
+
+    /**
+     * The dot separator before the episode number survives the strip and used
+     * to trail the cleaned name; the post-strip re-trim must catch it.
+     */
+    public function test_extract_anime_name_retrims_dangling_dot_after_episode_strip(): void
+    {
+        $result = $this->invokePrivate($this->makeProvider(), 'extractAnimeName', [
+            '/anime/Cowboy Bebop. 04.mkv',
+        ]);
+
+        $this->assertSame('Cowboy Bebop', $result);
+    }
+
     public function test_implements_shared_metadata_source_contract(): void
     {
         $provider = $this->makeProvider();
@@ -1623,16 +1796,16 @@ final class MyanimelistMetadataProviderTest extends TestCase
 
     /**
      * Test extractAnimeName with group name in brackets at start.
-     * The code strips [GroupName] patterns but does not strip episode numbers
-     * without a letter prefix (like E05 or Episode 05). So " - 05" remains.
+     * The standalone-episode strip removes the " - 05" (digits trailing after
+     * a separator), and the re-trim that follows detaches the dangling ' -'
+     * the episode strip leaves behind — the query must carry no residue.
      */
     public function test_extract_anime_name_with_leading_group_tag(): void
     {
         $result = $this->invokePrivate($this->makeProvider(), 'extractAnimeName', [
             '[SubsPlease] My Hero Academia - 05 (720p).mkv',
         ]);
-        // The code does not strip " - 05" without an E/Episode prefix
-        $this->assertSame('My Hero Academia -', $result);
+        $this->assertSame('My Hero Academia', $result);
     }
 
     /**

@@ -94,6 +94,15 @@ final class MyanimelistMetadataProviderAdapter implements MetadataProviderInterf
             return [];
         }
 
+        if ($malId <= 0) {
+            // Boundary pin: MAL ids are 1-based (the provider's scorer now
+            // rejects junk nodes), and a stub result carrying id "0" would be
+            // refused right back by parseMalId() on getDetails() — refuse it
+            // here instead of returning a result the adapter itself cannot
+            // resolve.
+            return [];
+        }
+
         $details = $this->provider->fetchAnimeMetadata($malId);
         if ($details === []) {
             // We have a MAL ID but could not enrich it; still return a usable stub

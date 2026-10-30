@@ -267,6 +267,21 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             );
         }
 
+        // The value is interpolated into a request header verbatim, so it must
+        // be printable ASCII (RFC 9110 field-value): a control character —
+        // CR/LF above all — would be a header-injection primitive, and spaces
+        // are not part of any MAL-issued Client ID. Reject the RAW stored
+        // value (not the trim of it): the blank check above already covers
+        // whitespace-only settings; anything else non-printable means the
+        // config itself is malformed or hostile and no request may carry it.
+        if (preg_match('/^[\x21-\x7E]+$/', $clientId) !== 1) {
+            throw new \InvalidArgumentException(
+                'MyAnimeList "client_id" must contain only printable ASCII '
+                . 'characters (no spaces, CR/LF or other control bytes) — '
+                . 'it is sent verbatim as the X-MAL-CLIENT-ID header value.'
+            );
+        }
+
         $this->settings = $settings;
         $this->clock = static fn(): float => microtime(true);
         $this->timerSleep = static function (float $seconds): void {
@@ -581,6 +596,13 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             return [];
         }
 
+        if ($malId <= 0) {
+            // Defensive boundary: MAL ids are 1-based, so 0/negative can only
+            // be malformed API data. Never carry it into the details fetch
+            // (`/anime/0` is not a thing) nor out as `mal_id` to the host.
+            return [];
+        }
+
         // Step 3: Fetch full anime details from MAL
         $anime = $this->fetchAnimeDetails($malId);
         if ($anime === null) {
@@ -709,28 +731,50 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         try {
             $this->getHttpClient()->request($url, $options);
         } catch (\Throwable $e) {
-            $this->logger?->debug('MAL API request threw: ' . $e->getMessage());
+            $this->logger?->debug('MAL API request threw: ' . $this->scrubForLog($e->getMessage()));
 
             return null;
         }
 
         // Cooperative wait — yields to the event loop so other tasks proceed
-        // while the response is in flight. Bounded by the request timeout plus
-        // a small grace so a lost callback can never wedge the worker.
-        $waited = 0.0;
-        $maxWait = (float) self::HTTP_TIMEOUT_SEC + 1.0;
-        while (!$state['done'] && $waited < $maxWait) {
+        // while the response is in flight. Bounded by WALL CLOCK (the same
+        // seconds the request `timeout` is declared in) plus a small grace, so
+        // a lost callback can never wedge the worker: tick-counting would let
+        // any runtime that coalesces or fast-forwards ticks stretch the bound
+        // to arbitrary wall time.
+        $deadline = ($this->clock)() + self::HTTP_TIMEOUT_SEC + 1.0;
+        while (!$state['done'] && ($this->clock)() < $deadline) {
             ($this->waitTick)();
-            $waited += self::WAIT_INTERVAL_SEC;
         }
 
         if ($state['error'] !== null) {
-            $this->logger?->debug('MAL API transport error: ' . $state['error']->getMessage());
+            $this->logger?->debug(
+                'MAL API transport error: ' . $this->scrubForLog($state['error']->getMessage())
+            );
 
             return null;
         }
 
         return $state['response'];
+    }
+
+    /**
+     * Sanitize a transport exception message for the log line.
+     *
+     * These messages are NOT purely local text: the vendored transport
+     * composes them from REMOTE bytes — e.g. Request::onMessage throws
+     * `Invalid response string: <start-line>` and unexpected-close errors
+     * embed the peer address. Control characters (NUL, ESC sequences, raw
+     * CR/LF beyond the line break our logger itself appends) would enter the
+     * log file verbatim, enabling terminal/log injection for anyone who
+     * later `cat`s or greps it. Keep printable ASCII, cap the length: the
+     * diagnosis survives, the payload does not.
+     */
+    private function scrubForLog(string $message): string
+    {
+        $truncated = substr($message, 0, 200);
+
+        return preg_replace('/[^\x20-\x7E]/', '?', $truncated) ?? $truncated;
     }
 
     /**
@@ -867,11 +911,18 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * Record a back-off window from a 429/503 response's Retry-After header
      * (extracted from a Workerman Response object).
      *
+     * RFC 9110 allows two forms and both are honored: delta-seconds
+     * (`Retry-After: 30`) and an HTTP-date (`Retry-After: Wed, 21 Oct 2026
+     * 07:28:00 GMT`), parsed strictly against the RFC 7231 fixed shape —
+     * deliberately NOT a loose `strtotime()` grammar, which accepts relative
+     * junk a server should never send.
+     *
      * The recorded delay is bounded: non-finite numeric strings (e.g.
-     * `1e999`, which overflows to INF) fall back to the default interval and
-     * finite values are clamped into [0, {@see MAX_RETRY_AFTER_SEC}] before
-     * they reach {@see enforceRateLimit()} — a single header must never be
-     * able to park a resident worker for an arbitrary duration.
+     * `1e999`, which overflows to INF), unparseable dates and dates already
+     * in the past fall back to the default interval, and finite values are
+     * clamped into [0, {@see MAX_RETRY_AFTER_SEC}] before they reach
+     * {@see enforceRateLimit()} — a single header must never be able to park
+     * a resident worker for an arbitrary duration.
      *
      * @param Response $response Workerman HTTP Response object.
      *
@@ -882,10 +933,32 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         $delaySeconds = self::RATE_LIMIT_INTERVAL_SEC;
 
         $retryAfter = $response->getHeaderLine('Retry-After');
-        if ($retryAfter !== '' && is_numeric($retryAfter)) {
-            $candidate = (float) $retryAfter;
-            if (is_finite($candidate)) {
-                $delaySeconds = min(max($candidate, 0.0), self::MAX_RETRY_AFTER_SEC);
+        if ($retryAfter !== '') {
+            if (is_numeric($retryAfter)) {
+                $candidate = (float) $retryAfter;
+                if (is_finite($candidate)) {
+                    $delaySeconds = min(max($candidate, 0.0), self::MAX_RETRY_AFTER_SEC);
+                }
+            } else {
+                // HTTP-date form: the wait is the distance from NOW to the
+                // instant named (never the raw timestamp); a past date means
+                // the server already released us, so keep the safe default.
+                // The timezone argument is REQUIRED, not decorative: RFC 7231
+                // dates are by definition GMT, but createFromFormat's `\G\M\T`
+                // is a literal — without an explicit UTC the wall-clock
+                // fields would be read in the host timezone, shifting every
+                // instant by the host offset (a +14400s "wait" in NY).
+                $when = \DateTimeImmutable::createFromFormat(
+                    \DateTimeInterface::RFC7231,
+                    $retryAfter,
+                    new \DateTimeZone('UTC')
+                );
+                if ($when !== false) {
+                    $candidate = (float) ($when->getTimestamp() - (int) floor(($this->clock)()));
+                    if (is_finite($candidate) && $candidate > 0.0) {
+                        $delaySeconds = min($candidate, self::MAX_RETRY_AFTER_SEC);
+                    }
+                }
             }
         }
 
@@ -1002,6 +1075,12 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             }
 
             $id = is_numeric($node['id']) ? (int) $node['id'] : 0;
+            if ($id <= 0) {
+                // No usable MAL id: non-numeric, zero or negative nodes can
+                // never be fetched for details — scoring them would let a
+                // junk row win and surface id 0 to the caller.
+                continue;
+            }
 
             // Collect all titles for this candidate
             $titles = [];
@@ -1123,7 +1202,12 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      */
     private function parseAnimeResponse(array $raw): ?array
     {
-        if (!isset($raw['id'])) {
+        // The docblock contract, now enforced: no usable ID -> null. MAL ids
+        // are 1-based naturals, so "usable" means numeric and positive; a
+        // non-numeric, zero or negative id is not laundered into 0 but makes
+        // the whole record unaddressable (it can never be fetched or cited).
+        $rawId = $raw['id'] ?? null;
+        if (!is_numeric($rawId) || (int) $rawId <= 0) {
             return null;
         }
 
@@ -1146,17 +1230,24 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             : null;
 
         $mainPicture = is_array($raw['main_picture'] ?? null) ? $raw['main_picture'] : [];
+        // `!== ''` matters: MAL (and any partial `fields=` response) can carry
+        // an empty string where artwork should be — an '' would defeat the
+        // `??` fallbacks below and paint "poster exists but is blank".
         $pictureLarge = isset($mainPicture['large']) && is_string($mainPicture['large'])
+            && $mainPicture['large'] !== ''
             ? $mainPicture['large']
             : null;
         $pictureMedium = isset($mainPicture['medium']) && is_string($mainPicture['medium'])
+            && $mainPicture['medium'] !== ''
             ? $mainPicture['medium']
             : null;
 
         $genres = [];
         if (isset($raw['genres']) && is_array($raw['genres'])) {
             foreach ($raw['genres'] as $genre) {
-                if (is_array($genre) && isset($genre['name']) && is_string($genre['name'])) {
+                if (is_array($genre) && isset($genre['name']) && is_string($genre['name'])
+                    && $genre['name'] !== ''
+                ) {
                     $genres[] = $genre['name'];
                 }
             }
@@ -1189,7 +1280,8 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         $title = isset($raw['title']) && is_string($raw['title']) ? $raw['title'] : '';
 
         return [
-            'id'             => is_numeric($raw['id']) ? (int) $raw['id'] : 0,
+            // Guaranteed usable by the gate at the top of this method.
+            'id'             => (int) $rawId,
             'title'          => $title,
             'en_title'       => $enTitle,
             'ja_title'       => $jaTitle,
@@ -1302,10 +1394,18 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
 
         // Strip standalone episode numbers: leading separator before 1-4 digits at end
         // Now genuinely trailing after resolution/codec/source has been stripped
+        // ($clean is a definite string since the trim above, so no ?? hedge).
         $clean = preg_replace('/[.\- ][0-9]{1,4}$/', '', $clean);
 
+        // Re-trim: the strips above (episode number most visibly) detach text
+        // from the right end and can leave a dangling separator —
+        // 'My Hero Academia - 05' becomes 'My Hero Academia -' here, which the
+        // pre-episode trim (running BEFORE these strips) could not have caught.
+        // Without this, the dangling ' -' rides into the MAL query verbatim.
+        $clean = trim((string) $clean, '.-_ ');
+
         // Replace remaining dots with spaces (common in anime filenames)
-        $clean = str_replace('.', ' ', $clean ?? '');
+        $clean = str_replace('.', ' ', $clean);
 
         // If result is too short or looks like garbage, skip
         if (strlen($clean) < 2) {

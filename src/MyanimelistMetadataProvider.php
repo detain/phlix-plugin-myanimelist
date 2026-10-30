@@ -69,7 +69,7 @@ use Workerman\Timer;
  *
  * @see https://myanimelist.net/apiconfig/references/api/v2
  * @package Phlix\Myanimelist
- * @since 0.1.0
+ * @since 0.2.0
  */
 class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceInterface
 {
@@ -140,7 +140,13 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     /**
      * Fields requested from the MAL anime-details endpoint.
      *
-     * `pictures` is requested so a backdrop/fanart image can be derived.
+     * MAL returns nested data ONLY for fields listed here: trim
+     * `alternative_titles`/`genres`/`studios`/`pictures` from the list and
+     * the failure is silent, not loud — titles lose their English/Japanese/
+     * synonym variants (scoring degrades to main-title matching only),
+     * genres and studio come back empty, `fanart_url` becomes null, and the
+     * `adult_rating` gate input disappears. No error is raised anywhere;
+     * metadata just quietly degrades. Keep every consumed field listed.
      */
     private const DETAIL_FIELDS = 'id,title,main_picture,alternative_titles,start_date,'
         . 'synopsis,mean,num_scoring_users,genres,num_episodes,media_type,status,'
@@ -241,9 +247,26 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      *     Plugin settings from plugin.json. client_id is the MyAnimeList API
      *     client ID, sent as the X-MAL-CLIENT-ID header on every request.
      *     use_ssl_verification toggles TLS certificate verification (default true).
+     *
+     * @throws \InvalidArgumentException
+     *     when the required secret `client_id` is missing or blank. The
+     *     setting is declared `required: true, secret: true` in plugin.json;
+     *     accepting it empty would paper the absence over as an empty header
+     *     value (silently "no results", the same invisible outage the
+     *     transport-failure logging at {@see handleResponseObject()} exists
+     *     to surface). Fail fast at the boundary instead.
      */
     public function __construct(array $settings)
     {
+        $clientId = (string) ($settings['client_id'] ?? '');
+        if (trim($clientId) === '') {
+            throw new \InvalidArgumentException(
+                'MyAnimeList plugin requires a non-empty "client_id" setting '
+                . '(the MyAnimeList API Client ID, sent as the X-MAL-CLIENT-ID '
+                . 'header). Configure it in the plugin settings before enabling.'
+            );
+        }
+
         $this->settings = $settings;
         $this->clock = static fn(): float => microtime(true);
         $this->timerSleep = static function (float $seconds): void {
@@ -484,8 +507,16 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     /**
      * Called by the loader once when the plugin is disabled.
      *
-     * Drops the response cache. MAL holds no open sockets, so there is
-     * nothing else to tear down.
+     * Drops the in-memory response cache (defense-in-depth for credential
+     * rotation: bodies fetched under the old Client ID are never replayed by
+     * a later instance). What this hook CANNOT do is tear down the HTTP
+     * transport: once the first API call built the shared
+     * {@see Client} lazily, its pooled connections to api.myanimelist.net:443
+     * outlive this method — the vendored client exposes no public close API
+     * (ConnectionPool has only closeTimeoutConnection()), and dropping the
+     * registration detaches the instance so the worker's next GC reclaims
+     * it along with its pool. The "no open sockets" claim that used to live
+     * here was true only pre-first-request.
      *
      * @return void
      */

@@ -58,6 +58,10 @@ Configure these in the Phlix admin **Plugins → Configure** dialog.
 | `client_id` | string (secret) | **Yes** | — | Your MyAnimeList API Client ID, sent as the `X-MAL-CLIENT-ID` header. |
 | `use_ssl_verification` | boolean | No | `true` | Verify TLS certificates when calling the MAL API. |
 
+The plugin validates `client_id` when it is constructed: enabling it with a
+blank or missing Client ID throws immediately at that boundary instead of
+storing the credential and failing later on every request.
+
 ### Where to get your Client ID
 
 Create an API application at [myanimelist.net/apiconfig](https://myanimelist.net/apiconfig)
@@ -91,6 +95,15 @@ implemented for interface parity, but the host does not call it.
   `r-17`, `rx`) is still surfaced as `adult_rating` on the metadata map so a
   host that resolves entries by other means can apply its own gate
 - **Details**: `GET /anime/{id}?fields=id,title,main_picture,alternative_titles,start_date,synopsis,mean,num_scoring_users,genres,num_episodes,media_type,status,studios,average_episode_duration,rating,pictures` (`pictures` is what makes `fanart_url` possible — drop it and fanart silently becomes null)
+- **`fields=` is the headline MAL gotcha**: MAL returns nested data
+  (`alternative_titles`, `genres`, `studios`, `pictures`, …) only for fields
+  that are explicitly listed in the `fields=` parameter, on both the details
+  and search endpoints. Trimming a field from the list fails SILENTLY —
+  no error, no warning — the metadata just degrades: blank genres/studio,
+  null fanart, scoring reduced to main-title matching (English/Japanese/
+  synonym alternatives disappear), and `adult_rating` vanishes. Every key
+  the parsers read is requested; if you edit `DETAIL_FIELDS` or the search
+  `fields=`, keep the consumed set complete.
 - **Rate limiting**: ~1 request/second; a `Retry-After` on 429/503 is honored
   but clamped to 300s (non-finite header values fall back to the default
   interval) so one pathological response can never park a resident worker

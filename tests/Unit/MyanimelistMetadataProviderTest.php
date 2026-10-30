@@ -48,6 +48,51 @@ final class MyanimelistMetadataProviderTest extends TestCase
         return $provider;
     }
 
+    // -------------------------------------------------------------------------
+    // M-21 (minors lane W-min71): required client_id fails fast at the boundary
+    // -------------------------------------------------------------------------
+
+    /**
+     * @return array<string, array{array<string, mixed>}>
+     */
+    public static function blankClientIdProvider(): array
+    {
+        return [
+            'missing key'        => [[]],
+            'empty string'       => [['client_id' => '']],
+            'spaces only'        => [['client_id' => '   ']],
+            'tab/newline only'   => [['client_id' => "\t \n"]],
+            'null value'         => [['client_id' => null]],
+        ];
+    }
+
+    /**
+     * @dataProvider blankClientIdProvider
+     * @param array<string, mixed> $settings
+     */
+    public function test_constructor_throws_on_blank_required_client_id(array $settings): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('client_id');
+
+        new MyanimelistMetadataProvider($settings);
+    }
+
+    /**
+     * The guard must reject BEFORE any side effect: no properties set, no HTTP
+     * client built, nothing to unwind for the host. A valid id constructs.
+     */
+    public function test_constructor_accepts_the_valid_test_credential_control(): void
+    {
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        $ref = new \ReflectionClass($provider);
+        $prop = $ref->getProperty('httpClient');
+        $prop->setAccessible(true);
+
+        $this->assertNull($prop->getValue($provider), 'construction never builds the HTTP client');
+    }
+
     public function test_implements_shared_metadata_source_contract(): void
     {
         $provider = $this->makeProvider();

@@ -29,8 +29,16 @@ use Workerman\Timer;
  *
  * - MAL API v2 integration (search + details) over HTTP/JSON
  * - Client-ID authentication via the `X-MAL-CLIENT-ID` header
- * - Rate limiting — ~1 request/second to respect MAL's implicit limit
- * - In-memory response caching — identical URLs are fetched once per session
+ * - Rate limiting — ~1 request/second to respect MAL's implicit limit;
+ *   `Retry-After` back-off from 429/503 is clamped to a finite cap so a
+ *   resident worker can never be parked by an arbitrarily large header
+ * - In-memory response caching — identical URLs are served from memory while
+ *   fresh (1-hour TTL) and the cache is capped (512 entries, oldest evicted),
+ *   so a resident worker's view of MAL cannot freeze at a stale snapshot
+ * - NSFW default-deny: no `nsfw`/`nsfw_all` parameter is ever sent, so adult
+ *   entries are excluded from search results and unresolvable via details;
+ *   the details `rating` classification is surfaced as `adult_rating` for
+ *   host-side gating
  * - Optional SSL verification toggle (`use_ssl_verification`) for self-hosted
  *   proxies — honored via the HTTP client's TLS stream context; when disabled
  *   a warning is logged on client build (never silently unverified)
@@ -94,6 +102,34 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     private const RATE_LIMIT_INTERVAL_SEC = 1.0;
 
     /**
+     * Upper bound (seconds) applied to a `Retry-After` back-off read from a
+     * 429/503 response.
+     *
+     * A malformed or hostile header (seconds-since-epoch values, or numeric
+     * strings like `1e999` that overflow to INF) must never park a resident
+     * worker indefinitely: finite values are clamped to this cap and
+     * non-finite values fall back to the default interval.
+     */
+    private const MAX_RETRY_AFTER_SEC = 300.0;
+
+    /**
+     * How long (seconds) an in-memory cached API response stays fresh.
+     *
+     * The provider lives in long-lived resident workers; without a TTL a URL
+     * fetched once would be served from cache forever, silently defeating the
+     * server's `metadata.cache_ttl_hours` policy.
+     */
+    private const CACHE_TTL_SEC = 3600.0;
+
+    /**
+     * Maximum number of entries kept in the in-memory response cache.
+     *
+     * Writes evict the least-recently-inserted entry beyond this bound,
+     * capping per-worker memory growth.
+     */
+    private const CACHE_MAX_ENTRIES = 512;
+
+    /**
      * Fields requested from the MAL anime-details endpoint.
      *
      * `pictures` is requested so a backdrop/fanart image can be derived.
@@ -129,14 +165,22 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * Unix timestamp (with microseconds) before which no further request may be
      * issued, set from a `Retry-After` header on a 429/503 response.
      *
+     * The recorded deadline is clamped: the header's delay never exceeds
+     * {@see MAX_RETRY_AFTER_SEC} and never enters $this as a non-finite value.
+     *
      * 0.0 means no back-off is currently in effect.
      */
     private float $retryAfterUntil = 0.0;
 
     /**
-     * In-memory response cache: md5(url) => decoded JSON object.
+     * In-memory response cache: md5(url) => [decoded JSON object, fetch time].
      *
-     * @var array<string, array<string, mixed>>
+     * Entries are checked against {@see CACHE_TTL_SEC} at read time and the
+     * map is capped at {@see CACHE_MAX_ENTRIES} entries (oldest-inserted
+     * evicted on write), so a resident worker's view of MAL cannot freeze at
+     * a stale snapshot or grow without bound.
+     *
+     * @var array<string, array{0: array<string, mixed>, 1: float}>
      */
     private array $cache = [];
 
@@ -480,7 +524,8 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      *     titles: array<int, string>,
      *     status: string|null,
      *     runtime_ticks: int|null,
-     *     studio: string|null
+     *     studio: string|null,
+     *     adult_rating: string|null
      * }|array{} Matched anime metadata or empty array when not found.
      */
     public function lookup(string $filePath): array
@@ -519,6 +564,8 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      *
      * The HTTP status line is inspected before the body is trusted: only a
      * 2xx response carrying a well-formed JSON object is decoded and cached.
+     * Cached bodies are served only while fresh ({@see CACHE_TTL_SEC}); an
+     * expired entry is dropped and the URL refetched.
      * A 4xx/5xx error body (e.g. the JSON error MAL returns on a rejected
      * Client ID or unknown anime) is never decoded-and-cached as if it were
      * real data — it returns null. A 429/503 additionally records a back-off
@@ -541,7 +588,14 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     {
         $cacheKey = md5($url);
         if (isset($this->cache[$cacheKey])) {
-            return $this->cache[$cacheKey];
+            /** @var array{0: array<string, mixed>, 1: float} $entry */
+            $entry = $this->cache[$cacheKey];
+            if (($this->clock)() - $entry[1] < self::CACHE_TTL_SEC) {
+                return $entry[0];
+            }
+
+            // Fresh-window expired: drop the entry and refetch.
+            unset($this->cache[$cacheKey]);
         }
 
         $this->enforceRateLimit();
@@ -679,7 +733,16 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         }
 
         /** @var array<string, mixed> $decoded */
-        $this->cache[$cacheKey] = $decoded;
+        $this->cache[$cacheKey] = [$decoded, ($this->clock)()];
+
+        // Cap the cache: PHP arrays preserve insertion order and read hits do
+        // not re-insert, so the first key is the least-recently-fetched entry.
+        if (count($this->cache) > self::CACHE_MAX_ENTRIES) {
+            $oldest = array_key_first($this->cache);
+            if ($oldest !== null) {
+                unset($this->cache[$oldest]);
+            }
+        }
 
         return $decoded;
     }
@@ -752,6 +815,12 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * Record a back-off window from a 429/503 response's Retry-After header
      * (extracted from a Workerman Response object).
      *
+     * The recorded delay is bounded: non-finite numeric strings (e.g.
+     * `1e999`, which overflows to INF) fall back to the default interval and
+     * finite values are clamped into [0, {@see MAX_RETRY_AFTER_SEC}] before
+     * they reach {@see enforceRateLimit()} — a single header must never be
+     * able to park a resident worker for an arbitrary duration.
+     *
      * @param Response $response Workerman HTTP Response object.
      *
      * @return void
@@ -762,7 +831,10 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
 
         $retryAfter = $response->getHeaderLine('Retry-After');
         if ($retryAfter !== '' && is_numeric($retryAfter)) {
-            $delaySeconds = (float) $retryAfter;
+            $candidate = (float) $retryAfter;
+            if (is_finite($candidate)) {
+                $delaySeconds = min(max($candidate, 0.0), self::MAX_RETRY_AFTER_SEC);
+            }
         }
 
         $until = ($this->clock)() + $delaySeconds;
@@ -1081,6 +1153,13 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             }
         }
 
+        // MAL's adult `rating` classification (g, pg-13, r-17, rx) — requested
+        // via DETAIL_FIELDS and surfaced for host-side gating. Distinct from
+        // the mean user score, which the internal 'rating' key already holds.
+        $adultRating = isset($raw['rating']) && is_string($raw['rating']) && $raw['rating'] !== ''
+            ? $raw['rating']
+            : null;
+
         // Parse year from start_date "YYYY-MM-DD" or "YYYY"
         $year = null;
         if (isset($raw['start_date']) && is_string($raw['start_date']) && strlen($raw['start_date']) >= 4) {
@@ -1117,6 +1196,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
                 : null,
             'status'         => isset($raw['status']) && is_string($raw['status']) ? $raw['status'] : null,
             'studio'         => $studio,
+            'adult_rating'   => $adultRating,
             'episode_length' => isset($raw['average_episode_duration']) && is_numeric($raw['average_episode_duration'])
                 ? (int) $raw['average_episode_duration']
                 : null,
@@ -1227,7 +1307,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      *
      * @param array<string, mixed> $anime Parsed from parseAnimeResponse().
      *
-     * @return array<string, mixed> Mapped metadata array (16 fixed keys).
+     * @return array<string, mixed> Mapped metadata array (17 fixed keys).
      */
     private function mapToMetadataReturn(array $anime): array
     {
@@ -1265,6 +1345,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             'status'        => $this->mapStatus($anime['status'] ?? null),
             'runtime_ticks' => $this->mapRuntimeTicks($anime['episode_length'] ?? null),
             'studio'        => $anime['studio'],
+            'adult_rating'  => $anime['adult_rating'] ?? null,
         ];
     }
 

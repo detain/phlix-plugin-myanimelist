@@ -879,4 +879,160 @@ final class MyanimelistTransportTest extends TestCase
             $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1'])
         );
     }
+
+    /**
+     * Resident-worker cache freshness law (M-MYANIMELIST-08): a cached body is
+     * served only inside the TTL window; past it the URL is refetched and the
+     * entry replaced. The clock is injected via a by-reference `use (&$now)`
+     * closure so no test ever sleeps.
+     */
+    public function test_cache_entry_is_fresh_within_the_ttl_and_refetched_after(): void
+    {
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        $now = 1_760_000_000.0;
+
+        $fakeClient = new class () extends Client {
+            public int $requests = 0;
+
+            public function __construct()
+            {
+                // Skip the parent ctor: it builds a ConnectionPool + coroutine
+                // Channel that need a running event loop.
+            }
+
+            public function request(string $url, array $options = []): mixed
+            {
+                $this->requests++;
+                ($options['success'])(new Response(200, [], '{"id":1,"title":"Generation ' . $this->requests . '"}'));
+
+                return null;
+            }
+        };
+
+        $ref = new \ReflectionClass($provider);
+
+        $httpClient = $ref->getProperty('httpClient');
+        $httpClient->setAccessible(true);
+        $httpClient->setValue($provider, $fakeClient);
+
+        $clock = $ref->getProperty('clock');
+        $clock->setAccessible(true);
+        $clock->setValue($provider, static function () use (&$now): float {
+            return $now;
+        });
+
+        $timerSleep = $ref->getProperty('timerSleep');
+        $timerSleep->setAccessible(true);
+        $timerSleep->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = $ref->getProperty('waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
+
+        $url = 'https://api.myanimelist.net/v2/anime/1';
+
+        $first = $this->invoke($provider, 'httpGetJson', [$url]);
+        $this->assertSame('Generation 1', $first['title']);
+        $this->assertSame(1, $fakeClient->requests);
+
+        // +3540s: still inside the 3600s window — served from cache, zero requests.
+        $now += 3540.0;
+        $cached = $this->invoke($provider, 'httpGetJson', [$url]);
+        $this->assertSame('Generation 1', $cached['title']);
+        $this->assertSame(1, $fakeClient->requests);
+
+        // +60s more: past the window — refetched, and the fresh body replaces the entry.
+        $now += 60.0;
+        $refetched = $this->invoke($provider, 'httpGetJson', [$url]);
+        $this->assertSame('Generation 2', $refetched['title']);
+        $this->assertSame(2, $fakeClient->requests);
+
+        // And the replacement is cached again: a third call at the same time is free.
+        $again = $this->invoke($provider, 'httpGetJson', [$url]);
+        $this->assertSame('Generation 2', $again['title']);
+        $this->assertSame(2, $fakeClient->requests);
+    }
+
+    /**
+     * The cache is capped: a write beyond CACHE_MAX_ENTRIES (512 — literal pin,
+     * rotate with the constant) evicts the oldest-inserted entry.
+     */
+    public function test_cache_is_capped_with_oldest_entry_evicted(): void
+    {
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(200, [], '{"id":7,"title":"Fresh"}'),
+        ]);
+
+        $ref = new \ReflectionClass($provider);
+        $cacheProp = $ref->getProperty('cache');
+        $cacheProp->setAccessible(true);
+
+        $now = microtime(true);
+        $seed = [];
+        for ($i = 0; $i < 512; $i++) {
+            $seed['seed-' . $i] = [['seed' => $i], $now];
+        }
+        $cacheProp->setValue($provider, $seed);
+
+        $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/7']);
+
+        /** @var array<string, array{0: array<string, mixed>, 1: float}> $cache */
+        $cache = $cacheProp->getValue($provider);
+        $this->assertCount(512, $cache);
+        $this->assertArrayNotHasKey('seed-0', $cache);
+        $this->assertArrayHasKey('seed-511', $cache);
+        $this->assertArrayHasKey(md5('https://api.myanimelist.net/v2/anime/7'), $cache);
+    }
+
+    /**
+     * NSFW default-deny posture (M-MYANIMELIST-08): the plugin never sends the
+     * `nsfw`/`nsfw_all` search parameters, so MAL's API-side default omits
+     * adult entries from results. Pinned at the wire: the actual request URL
+     * carries no nsfw parameter at all.
+     */
+    public function test_search_request_omits_nsfw_parameters(): void
+    {
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        $fakeClient = new class () extends Client {
+            public ?string $lastUrl = null;
+
+            public function __construct()
+            {
+            }
+
+            public function request(string $url, array $options = []): mixed
+            {
+                $this->lastUrl = $url;
+                ($options['success'])(new Response(200, [], '{"data":[]}'));
+
+                return null;
+            }
+        };
+
+        $ref = new \ReflectionClass($provider);
+
+        $httpClient = $ref->getProperty('httpClient');
+        $httpClient->setAccessible(true);
+        $httpClient->setValue($provider, $fakeClient);
+
+        $timerSleep = $ref->getProperty('timerSleep');
+        $timerSleep->setAccessible(true);
+        $timerSleep->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = $ref->getProperty('waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
+
+        $this->assertNull($this->invoke($provider, 'findIdByTitleInternal', ['Some Title']));
+
+        $this->assertNotNull($fakeClient->lastUrl);
+        $this->assertStringNotContainsString('nsfw', (string) $fakeClient->lastUrl);
+        $this->assertStringContainsString('q=', (string) $fakeClient->lastUrl);
+    }
 }

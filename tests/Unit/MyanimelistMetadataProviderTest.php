@@ -709,7 +709,9 @@ final class MyanimelistMetadataProviderTest extends TestCase
         /** @var array<string, mixed> $result */
         $result = $this->invokePrivate($this->makeProvider(), 'mapToMetadataReturn', [$parsed]);
 
-        // All 16 keys present and in order
+        // All 17 keys present and in order (M-MYANIMELIST-08: rotated from the
+        // 16-key pin — 'adult_rating' appended after 'studio', surfaced from
+        // the details `rating` classification the fixture carries as 'r').
         $this->assertSame([
             'title',
             'original_name',
@@ -727,6 +729,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
             'status',
             'runtime_ticks',
             'studio',
+            'adult_rating',
         ], array_keys($result));
 
         $this->assertSame('Cowboy Bebop', $result['title']);
@@ -747,6 +750,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $this->assertSame('Finished', $result['status']);
         $this->assertSame(1440 * 10_000_000, $result['runtime_ticks']);
         $this->assertSame('Sunrise', $result['studio']);
+        $this->assertSame('r', $result['adult_rating']);
     }
 
     public function test_map_uses_title_as_original_name_when_no_japanese_title(): void
@@ -1166,6 +1170,106 @@ final class MyanimelistMetadataProviderTest extends TestCase
 
         // Should NOT have decreased the backoff
         $this->assertSame($longBackoff, $retryAfterProp->getValue($provider));
+    }
+
+    public function test_record_retry_after_clamps_absurdly_large_headers(): void
+    {
+        $provider = $this->makeProvider();
+
+        $reflection = new \ReflectionClass($provider);
+        $retryAfterProp = $reflection->getProperty('retryAfterUntil');
+        $retryAfterProp->setAccessible(true);
+        $retryAfterProp->setValue($provider, 0.0);
+
+        $method = $reflection->getMethod('recordRetryAfterFromResponse');
+        $method->setAccessible(true);
+
+        // A year in seconds: far beyond any sane back-off window.
+        $response = new \Workerman\Http\Response(429, ['Retry-After' => '3153600000'], '');
+
+        $before = microtime(true);
+        $method->invoke($provider, $response);
+
+        $newValue = $retryAfterProp->getValue($provider);
+        // Clamped to MAX_RETRY_AFTER_SEC (300): parked ~5 minutes, never a century.
+        $this->assertGreaterThan($before + 290.0, $newValue);
+        $this->assertLessThanOrEqual(microtime(true) + 300.5, $newValue);
+    }
+
+    public function test_record_retry_after_falls_back_on_non_finite_header_values(): void
+    {
+        $provider = $this->makeProvider();
+
+        $reflection = new \ReflectionClass($provider);
+        $retryAfterProp = $reflection->getProperty('retryAfterUntil');
+        $retryAfterProp->setAccessible(true);
+        $retryAfterProp->setValue($provider, 0.0);
+
+        $method = $reflection->getMethod('recordRetryAfterFromResponse');
+        $method->setAccessible(true);
+
+        // is_numeric('1e999') is true and (float)'1e999' overflows to INF —
+        // the old code recorded retryAfterUntil = INF (Timer::sleep(INF)).
+        $response = new \Workerman\Http\Response(503, ['Retry-After' => '1e999'], '');
+
+        $before = microtime(true);
+        $method->invoke($provider, $response);
+
+        $newValue = $retryAfterProp->getValue($provider);
+        $this->assertFinite($newValue);
+        // Non-finite values fall back to the default RATE_LIMIT_INTERVAL_SEC (1.0).
+        $this->assertGreaterThanOrEqual($before + 0.9, $newValue);
+        $this->assertLessThanOrEqual($before + 2.0, $newValue);
+    }
+
+    // -------------------------------------------------------------------------
+    // adult_rating surfacing (M-MYANIMELIST-08)
+    // -------------------------------------------------------------------------
+
+    public function test_detail_rating_surfaces_as_adult_rating(): void
+    {
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode('{"id":5,"title":"Adult Title","rating":"r-17"}', true);
+
+        /** @var array<string, mixed> $parsed */
+        $parsed = $this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$decoded]);
+        $this->assertSame('r-17', $parsed['adult_rating']);
+
+        /** @var array<string, mixed> $result */
+        $result = $this->invokePrivate($this->makeProvider(), 'mapToMetadataReturn', [$parsed]);
+        $this->assertSame('r-17', $result['adult_rating']);
+    }
+
+    public function test_absent_empty_or_non_string_rating_yields_null_adult_rating(): void
+    {
+        $provider = $this->makeProvider();
+
+        /** @var array<string, mixed> $noRating */
+        $noRating = json_decode('{"id":6,"title":"No Rating"}', true);
+        $this->assertNull($this->readAdultRating($provider, $noRating));
+
+        /** @var array<string, mixed> $emptyRating */
+        $emptyRating = json_decode('{"id":7,"title":"Empty","rating":""}', true);
+        $this->assertNull($this->readAdultRating($provider, $emptyRating));
+
+        /** @var array<string, mixed> $numericRating */
+        $numericRating = json_decode('{"id":8,"title":"Numeric","rating":17}', true);
+        $this->assertNull($this->readAdultRating($provider, $numericRating));
+    }
+
+    /**
+     * Parse a raw details JSON array and read its internal adult_rating key.
+     *
+     * @param array<string, mixed> $raw
+     */
+    private function readAdultRating(MyanimelistMetadataProvider $provider, array $raw): ?string
+    {
+        /** @var array<string, mixed> $parsed */
+        $parsed = $this->invokePrivate($provider, 'parseAnimeResponse', [$raw]);
+        /** @var string|null $adultRating */
+        $adultRating = $parsed['adult_rating'];
+
+        return $adultRating;
     }
 
     // -------------------------------------------------------------------------

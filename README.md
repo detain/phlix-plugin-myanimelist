@@ -85,7 +85,18 @@ implemented for interface parity, but the host does not call it.
 - **Redirects**: refused outright (`allow_redirects => ['max' => 0]`) — the credential header is never
   re-issued to a redirect target; a 3xx is treated as a failed lookup
 - **Search**: `GET /anime?q=<query>&limit=10&fields=id,title,alternative_titles` → `{ "data": [ { "node": { "id", "title", ... } } ] }`
+- **NSFW default-deny**: requests never send `nsfw`/`nsfw_all`, so MAL omits
+  adult entries from search and refuses them via details — adult variants
+  simply never match. The details `rating` classification (`g`, `pg-13`,
+  `r-17`, `rx`) is still surfaced as `adult_rating` on the metadata map so a
+  host that resolves entries by other means can apply its own gate
 - **Details**: `GET /anime/{id}?fields=id,title,main_picture,alternative_titles,start_date,synopsis,mean,num_scoring_users,genres,num_episodes,media_type,status,studios,average_episode_duration,rating,pictures` (`pictures` is what makes `fanart_url` possible — drop it and fanart silently becomes null)
+- **Rate limiting**: ~1 request/second; a `Retry-After` on 429/503 is honored
+  but clamped to 300s (non-finite header values fall back to the default
+  interval) so one pathological response can never park a resident worker
+- **Caching**: decoded 2xx bodies are cached per URL for 1h (TTL) with the
+  cache capped at 512 entries (oldest evicted); the cache is also dropped on
+  disable, so bodies fetched under a rotated `client_id` are not replayed
 
 See the [MAL API v2 reference](https://myanimelist.net/apiconfig/references/api/v2) for full details.
 

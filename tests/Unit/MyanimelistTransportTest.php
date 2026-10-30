@@ -1035,4 +1035,60 @@ final class MyanimelistTransportTest extends TestCase
         $this->assertStringNotContainsString('nsfw', (string) $fakeClient->lastUrl);
         $this->assertStringContainsString('q=', (string) $fakeClient->lastUrl);
     }
+
+    /**
+     * M-16 (minors lane W-min70): every non-2xx failure must leave a log
+     * trace naming the STATUS CODE. A rejected credential (401/403) escalates
+     * to warning — the operator-error case that otherwise lives forever as an
+     * invisible "no results" — and other failures land at debug. The logged
+     * line must never carry the response body (remote-controlled bytes).
+     * A 2xx is the zero-log control.
+     */
+    public function test_non_2xx_failures_log_the_status_code_never_the_body(): void
+    {
+        $cases = [
+            [401, 'warning', '{"error":"invalid_client","note":"SECRET-BODY-MARKER"}'],
+            [403, 'warning', '{"error":"forbidden","note":"SECRET-BODY-MARKER"}'],
+            [404, 'debug', '{"error":"not_found","note":"SECRET-BODY-MARKER"}'],
+            [500, 'debug', 'INTERNAL-Secret-body-marker'],
+            [503, 'debug', '{"error":"unavailable","note":"SECRET-BODY-MARKER"}'],
+            [200, null, '{"id":1,"note":"SECRET-BODY-MARKER"}'],
+        ];
+
+        foreach ($cases as [$status, $level, $body]) {
+            /** @var list<array{0: string, 1: string}> $records */
+            $records = [];
+
+            $capture = static function (string $lvl) use (&$records): callable {
+                return static function ($message) use (&$records, $lvl): void {
+                    $records[] = [$lvl, (string) $message];
+                };
+            };
+
+            $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+            $logger->method('warning')->willReturnCallback($capture('warning'));
+            $logger->method('debug')->willReturnCallback($capture('debug'));
+
+            $provider = $this->makeProvider([
+                'api.myanimelist.net' => new Response($status, ['X-Err' => 'SECRET-HEADER-MARKER'], $body),
+            ]);
+            $provider->setLogger($logger);
+
+            $result = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+
+            if ($level === null) {
+                $this->assertIsArray($result, 'the 2xx control must succeed');
+                $this->assertSame([], $records, 'a 2xx must not log anything');
+                continue;
+            }
+
+            $this->assertNull($result, "HTTP $status must stay null");
+
+            $this->assertCount(1, $records, "HTTP $status must log exactly one line");
+            $this->assertSame($level, $records[0][0], "HTTP $status log level");
+            $this->assertStringContainsString((string) $status, $records[0][1], 'the line names the status code');
+            $this->assertStringNotContainsString('SECRET-BODY-MARKER', $records[0][1], 'body bytes never reach the log');
+            $this->assertStringNotContainsString('SECRET-HEADER-MARKER', $records[0][1], 'header values never reach the log');
+        }
+    }
 }

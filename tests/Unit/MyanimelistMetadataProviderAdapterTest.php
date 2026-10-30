@@ -221,8 +221,9 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
             });
 
         // Drive ONLY the registration step by invoking registerWithMetadataManager()
-        // via reflection — this is the exact call onEnable() makes after the
-        // connectivity check passes.
+        // via reflection — the one and only call onEnable() makes (there is no
+        // enable-time network probe: it was removed in 337c355, pinned by
+        // MyanimelistMetadataProviderTest::test_on_enable_completes_without_network_io_or_rate_limit_delay).
         $provider = $this->makeProviderWithProbe([
             '/anime?q=test&limit=1&fields=id' => ['data' => [['node' => ['id' => 1]]]],
         ]);

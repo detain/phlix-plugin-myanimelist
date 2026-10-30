@@ -29,9 +29,13 @@ use Workerman\Timer;
  *
  * - MAL API v2 integration (search + details) over HTTP/JSON
  * - Client-ID authentication via the `X-MAL-CLIENT-ID` header
- * - Rate limiting — ~1 request/second to respect MAL's implicit limit;
- *   `Retry-After` back-off from 429/503 is clamped to a finite cap so a
- *   resident worker can never be parked by an arbitrarily large header
+ * - Rate limiting — ~1 request/second PER RESIDENT WORKER, honoring MAL's
+ *   implicit limit. The limiter state (`$lastRequestTimestamp`) and any
+ *   recorded back-off deadline are process-local, so a fleet of ~14 resident
+ *   workers is roughly a workers × 1/s aggregate against MAL, not 1/s
+ *   fleet-wide. `Retry-After` back-off from 429/503 is clamped to a finite
+ *   cap so a resident worker can never be parked by an arbitrarily large
+ *   header
  * - In-memory response caching — identical URLs are served from memory while
  *   fresh (1-hour TTL) and the cache is capped (512 entries, oldest evicted),
  *   so a resident worker's view of MAL cannot freeze at a stale snapshot
@@ -48,7 +52,8 @@ use Workerman\Timer;
  *   boot-time failure
  * - Filename heuristics to extract a clean search query
  * - Poster (main_picture) + fanart (additional `pictures`) image extraction
- * - Maps MAL responses to Phlix MetadataManager's expected return shape
+ * - Maps MAL responses to the legacy lookup() return contract (the live host
+ *   path is the adapter triad; see {@see mapToMetadataReturn()})
  *
  * ## Configuration (plugin.json settings)
  *
@@ -97,7 +102,10 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     /**
      * Minimum interval between API requests in seconds (rate protection).
      *
-     * MAL suggests approximately one request per second.
+     * MAL suggests approximately one request per second. The enforcing
+     * state ($lastRequestTimestamp / $retryAfterUntil) is process-local,
+     * so this spaces each resident worker's OWN requests: a fleet of ~14
+     * workers is roughly 14/s aggregate, not 1/s fleet-wide.
      */
     private const RATE_LIMIT_INTERVAL_SEC = 1.0;
 
@@ -548,7 +556,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             return [];
         }
 
-        // Step 4: Map to return shape expected by MetadataManager
+        // Step 4: Map to this plugin's legacy lookup() return contract
         return $this->mapToMetadataReturn($anime);
     }
 
@@ -717,6 +725,19 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         // body. Record a back-off on 429/503 so the next request honours MAL's
         // Retry-After before trying again.
         if ($status < 200 || $status >= 300) {
+            // Surface the failure with its status code (never headers or body)
+            // so a wrong/revoked Client ID (401/403) is diagnosable instead of
+            // a silent, forever "no results". A rejected credential is the
+            // operator-error case worth a warning; everything else is debug.
+            if ($status === 401 || $status === 403) {
+                $this->logger?->warning(
+                    'MAL API returned HTTP ' . $status . ' — check the configured client_id '
+                    . '(revoked/invalid Client ID); request will not be cached.'
+                );
+            } else {
+                $this->logger?->debug('MAL API returned HTTP ' . $status);
+            }
+
             if ($status === 429 || $status === 503) {
                 $this->recordRetryAfterFromResponse($response);
             }
@@ -1303,7 +1324,12 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     // -------------------------------------------------------------------------
 
     /**
-     * Map a parsed MAL anime array to the return shape expected by MetadataManager.
+     * Map a parsed MAL anime array to the legacy {@see lookup()} return contract.
+     *
+     * The 17-key shape below is THIS plugin's own lookup() contract, not a
+     * host-verified one: the live host drives the adapter triad
+     * ({@see MyanimelistMetadataProviderAdapter}) and stores detail payloads
+     * opaquely, so no server-side code pins these key names.
      *
      * @param array<string, mixed> $anime Parsed from parseAnimeResponse().
      *

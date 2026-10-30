@@ -130,9 +130,9 @@ A no-match returns `[]`.
 This plugin is based on [`phlix-plugin-example`](https://github.com/detain/phlix-plugin-example). To create your own metadata provider:
 
 1. Fork or copy this repository.
-2. Edit `plugin.json` — pick a new `name` (must start with `phlix-plugin-`), bump `version` to `0.1.0`, change `entry` to your FQCN.
+2. Edit `plugin.json` — pick a new `name` (must start with `phlix-plugin-`), set `version` to your own starting version (a new fork begins its own line, e.g. `0.1.0` — this repository is already at `0.3.0`, so "start at 0.1.0" is a fresh line, not a downgrade), change `entry` to your FQCN.
 3. Edit `composer.json` — rename the package, update PSR-4 autoload prefix.
-4. Replace `src/MyanimelistMetadataProvider.php` with your own implementation.
+4. Replace `src/MyanimelistMetadataProvider.php` with your own implementation — and handle `src/MyanimelistMetadataProviderAdapter.php` too: its `use` statements and type-hints pin the provider FQCN, so it must be replaced or renamed along with the provider it wraps.
 5. Run tests: `composer install && vendor/bin/phpunit`.
 
 ## Testing

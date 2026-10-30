@@ -21,7 +21,11 @@ Every request carries an `X-MAL-CLIENT-ID` header with your MAL client ID.
 - **Full metadata** — primary/English/Japanese titles, synonyms, genres, year, type, rating
 - **Episode info** — episode count and average episode runtime
 - **Synopsis** — long-form description text
-- **No SDK** — plain HTTP/JSON over the PHP stream wrapper; no extra dependencies
+- **No SDK** — plain HTTP/JSON against the MAL REST API via the vendored
+  [`workerman/http-client`](https://github.com/walkor/http-client) async client
+  (`Workerman\Http\Client` over pooled HTTPS), not PHP stream wrappers. Runtime
+  requires: `workerman/http-client`, `detain/phlix-shared`, `psr/container`,
+  `psr/log` — see `composer.json` (which is why Install step 4 runs `composer install`).
 
 ## Install
 

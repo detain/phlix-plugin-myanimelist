@@ -77,7 +77,7 @@ When the MetadataManager calls `lookup($filePath)`:
 - **Protocol**: REST/JSON over HTTPS to `https://api.myanimelist.net/v2`
 - **Auth**: every request sends `X-MAL-CLIENT-ID: <client_id>`
 - **Search**: `GET /anime?q=<query>&limit=10` → `{ "data": [ { "node": { "id", "title", ... } } ] }`
-- **Details**: `GET /anime/{id}?fields=id,title,main_picture,alternative_titles,start_date,synopsis,mean,num_scoring_users,genres,num_episodes,media_type,status,studios,average_episode_duration,rating`
+- **Details**: `GET /anime/{id}?fields=id,title,main_picture,alternative_titles,start_date,synopsis,mean,num_scoring_users,genres,num_episodes,media_type,status,studios,average_episode_duration,rating,pictures` (`pictures` is what makes `fanart_url` possible — drop it and fanart silently becomes null)
 
 See the [MAL API v2 reference](https://myanimelist.net/apiconfig/references/api/v2) for full details.
 
@@ -93,7 +93,7 @@ See the [MAL API v2 reference](https://myanimelist.net/apiconfig/references/api/
     'rating'        => 8.75,                     // MAL mean score (0-10)
     'vote_count'    => 900000,                   // Number of scoring users
     'poster_url'    => 'https://cdn.myanimelist.net/images/anime/4/19644l.jpg',
-    'fanart_url'    => null,                      // MAL has no fanart/backdrop
+    'fanart_url'    => 'https://cdn.myanimelist.net/images/anime/1904/120844.jpg', // first `pictures` entry (large preferred, medium fallback); null when the anime has none
     'episodes'      => 26,                        // Episode count
     'type'          => 'tv',                      // tv / movie / ova / special / ona / music
     'mal_id'        => 1,                         // MyAnimeList anime ID

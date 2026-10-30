@@ -34,7 +34,10 @@ use Workerman\Timer;
  * - Optional SSL verification toggle (`use_ssl_verification`) for self-hosted
  *   proxies — honored via the HTTP client's TLS stream context; when disabled
  *   a warning is logged on client build (never silently unverified)
- * - Connectivity/credential check on enable (fails fast on a bad Client ID)
+ * - No enable-time probe: the HTTP client is built lazily on first request
+ *   (onEnable does zero network I/O, never waits on the rate limiter); a bad
+ *   Client ID surfaces on the first lookup as a 4xx → "no results", never a
+ *   boot-time failure
  * - Filename heuristics to extract a clean search query
  * - Poster (main_picture) + fanart (additional `pictures`) image extraction
  * - Maps MAL responses to Phlix MetadataManager's expected return shape

@@ -4,12 +4,9 @@ parameters:
         - src
     bootstrapFiles:
         - vendor/autoload.php
+        # The adapter implements the host server's metadata contract; the
+        # server is not a composer dependency, so analysis loads the same
+        # verbatim test stub the phpunit bootstrap uses (tests/bootstrap.php).
+        # This keeps the whole of src/ at level 9 with no exclusions.
+        - tests/Stub/MetadataProviderInterface.php
     treatPhpDocTypesAsCertain: false
-    excludePaths:
-        - src/MyanimelistMetadataProviderAdapter.php
-    ignoreErrors:
-        -
-            message: '#^Method Phlix\\Myanimelist\\MyanimelistMetadataProvider\:\:parseSearchResponse\(\) is unused\.$#'
-            identifier: method.unused
-            count: 1
-            path: src/MyanimelistMetadataProvider.php

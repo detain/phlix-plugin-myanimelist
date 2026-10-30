@@ -166,6 +166,23 @@ JSON — no live network calls are made; the HTTP paths covered by
 writes `coverage.xml`; `.github/workflows/test.yml` runs the suite on PHP `8.3`
 and `8.4` and uploads that file to Codacy.
 
+### Static analysis (PHPStan level 9)
+
+The CI workflow gates `src/` at PHPStan **level 9** with no exclusions:
+
+```bash
+vendor/bin/phpstan analyse src --level=9   # the CI command verbatim
+vendor/bin/phpstan analyse -c phpstan.neon # same result, config-driven
+```
+
+`phpstan.neon` pins `level: 9`, `paths: [src]`, and bootstraps
+`tests/Stub/MetadataProviderInterface.php` — the same verbatim test stub
+`tests/bootstrap.php` loads — so the adapter (which implements the host
+server's metadata contract, absent from this repo's dependencies) analyzes
+cleanly instead of being excluded. Both invocations resolve the same
+configuration: the explicit `--level=9` command still auto-loads
+`phpstan.neon` for `bootstrapFiles`.
+
 ## Security Audit
 
 `.github/workflows/test.yml` also runs a blocking `composer-audit` job that

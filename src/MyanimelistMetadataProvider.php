@@ -959,41 +959,6 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     }
 
     /**
-     * Extract the first anime ID from a MAL search response.
-     *
-     * Response shape: `{ "data": [ { "node": { "id": 1, ... } }, ... ] }`.
-     *
-     * @param array<string, mixed> $response Decoded search JSON.
-     *
-     * @return int|null First node ID or null when the result set is empty.
-     *
-     * @internal Kept for test compatibility via reflection.
-     */
-    private function parseSearchResponse(array $response): ?int
-    {
-        $data = $response['data'] ?? null;
-        if (!is_array($data) || $data === []) {
-            return null;
-        }
-
-        $first = $data[0] ?? null;
-        if (!is_array($first)) {
-            return null;
-        }
-
-        $node = $first['node'] ?? null;
-        if (!is_array($node) || !isset($node['id'])) {
-            return null;
-        }
-
-        if (!is_numeric($node['id'])) {
-            return null;
-        }
-
-        return (int) $node['id'];
-    }
-
-    /**
      * Score each search result against all its titles and return the best match.
      *
      * MAL search returns results ranked by popularity, which may not correspond

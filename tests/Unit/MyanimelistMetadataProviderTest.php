@@ -295,49 +295,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
         ];
     }
 
-    // -------------------------------------------------------------------------
-    // parseSearchResponse
-    // -------------------------------------------------------------------------
-
-    public function test_parses_first_id_from_search_response(): void
-    {
-        $json = '{"data":[{"node":{"id":21,"title":"One Piece","main_picture":{"medium":"m.jpg","large":"l.jpg"}}},'
-            . '{"node":{"id":999,"title":"Other"}}]}';
-        /** @var array<string, mixed> $decoded */
-        $decoded = json_decode($json, true);
-
-        $result = $this->invokePrivate($this->makeProvider(), 'parseSearchResponse', [$decoded]);
-
-        $this->assertSame(21, $result);
-    }
-
-    /**
-     * @dataProvider emptySearchProvider
-     */
-    public function test_returns_null_for_empty_or_malformed_search(string $json): void
-    {
-        /** @var array<string, mixed> $decoded */
-        $decoded = json_decode($json, true);
-
-        $result = $this->invokePrivate($this->makeProvider(), 'parseSearchResponse', [$decoded]);
-
-        $this->assertNull($result);
-    }
-
-    /**
-     * @return array<string, array{string}>
-     */
-    public static function emptySearchProvider(): array
-    {
-        return [
-            'empty data array'   => ['{"data":[]}'],
-            'no data key'        => ['{"paging":{}}'],
-            'node without id'    => ['{"data":[{"node":{"title":"x"}}]}'],
-            'first not an array' => ['{"data":["nope"]}'],
-        ];
-    }
-
-    // -------------------------------------------------------------------------
+    // ------------------------------------------------------------------------
     // scoreSearchResults (B1: scored matching using alternative_titles)
     // -------------------------------------------------------------------------
 
@@ -1440,25 +1398,6 @@ final class MyanimelistMetadataProviderTest extends TestCase
     // or subclassed in tests. The inner loop (lines 349-366) is exercised
     // indirectly through the adapter tests, but not directly in isolation.
     // This is a known limitation given the final class constraint.
-
-    // -------------------------------------------------------------------------
-    // parseSearchResponse - non-numeric id case
-    // -------------------------------------------------------------------------
-
-    /**
-     * Test parseSearchResponse returns null when node id is present but not numeric.
-     * This exercises line 791 (is_numeric check in parseSearchResponse).
-     */
-    public function test_parse_search_response_returns_null_for_non_numeric_id(): void
-    {
-        $json = '{"data":[{"node":{"id":"not-a-number","title":"Bad ID"}}]}';
-        /** @var array<string, mixed> $decoded */
-        $decoded = json_decode($json, true);
-
-        $result = $this->invokePrivate($this->makeProvider(), 'parseSearchResponse', [$decoded]);
-
-        $this->assertNull($result);
-    }
 
     // -------------------------------------------------------------------------
     // adapter() (private, via reflection)

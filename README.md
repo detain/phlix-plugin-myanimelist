@@ -36,7 +36,7 @@ The plugin is unsigned by design. Install via the Phlix admin UI:
 3. Paste this URL into the **Install from URL** form:
 
    ```
-   https://raw.githubusercontent.com/detain/phlix-plugin-myanimelist/main/plugin.json
+   https://raw.githubusercontent.com/detain/phlix-plugin-myanimelist/master/plugin.json
    ```
 
 4. The server downloads and validates the manifest, runs `composer install --no-dev`, and stores a row in the `plugins` table.

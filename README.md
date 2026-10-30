@@ -82,6 +82,8 @@ implemented for interface parity, but the host does not call it.
 
 - **Protocol**: REST/JSON over HTTPS to `https://api.myanimelist.net/v2`
 - **Auth**: every request sends `X-MAL-CLIENT-ID: <client_id>`
+- **Redirects**: refused outright (`allow_redirects => ['max' => 0]`) — the credential header is never
+  re-issued to a redirect target; a 3xx is treated as a failed lookup
 - **Search**: `GET /anime?q=<query>&limit=10&fields=id,title,alternative_titles` → `{ "data": [ { "node": { "id", "title", ... } } ] }`
 - **Details**: `GET /anime/{id}?fields=id,title,main_picture,alternative_titles,start_date,synopsis,mean,num_scoring_users,genres,num_episodes,media_type,status,studios,average_episode_duration,rating,pictures` (`pictures` is what makes `fanart_url` possible — drop it and fanart silently becomes null)
 

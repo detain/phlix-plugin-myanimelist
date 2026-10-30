@@ -583,6 +583,14 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             'method'  => 'GET',
             'headers' => $headers,
             'timeout' => self::HTTP_TIMEOUT_SEC,
+            // Redirects are REFUSED outright: the vendored client (v3.1.3)
+            // defaults to following up to 5, and Request::redirect() re-issues
+            // the SAME options — our `headers` with X-MAL-CLIENT-ID included —
+            // against whatever Location the server names, cross-origin
+            // included. max 0 makes the first 3xx surface to the success
+            // callback, where handleResponseObject() treats it as the non-2xx
+            // failure it is. MAL API v2 does not redirect JSON endpoints.
+            'allow_redirects' => ['max' => 0],
         ];
 
         // TLS posture is NOT controlled here: workerman/http-client never

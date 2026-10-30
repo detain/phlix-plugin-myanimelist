@@ -760,4 +760,123 @@ final class MyanimelistTransportTest extends TestCase
         }
         $this->assertTrue($poolSeen, 'ConnectionPool.php missing from the scan set');
     }
+
+    /**
+     * M-MYANIMELIST-07 law: the credential header must never be re-issued on a
+     * redirect. The vendored workerman/http-client v3.1.3 defaults to
+     * `allow_redirects => ['max' => 5]` and Request::redirect() re-issues the
+     * SAME options array — including our `headers` with X-MAL-CLIENT-ID — to
+     * whatever Location the server named, cross-origin included (Client.php
+     * queues the follow-up; Request::end() then applies options['headers'] on
+     * the NEW host). The provider must explicitly refuse redirects.
+     *
+     * RED before the fix: the captured options carry no allow_redirects, so the
+     * library default follows the 3xx and the follow-up request arrives at the
+     * hostile host still holding the credential.
+     */
+    public function test_request_and_wait_refuses_redirects_so_the_client_id_never_leaves_the_api_host(): void
+    {
+        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+
+        $fakeClient = new class extends Client {
+            private array $capturedOptions = [];
+
+            public function request(string $url, array $options = []): mixed
+            {
+                $this->capturedOptions = $options;
+                if (isset($options['success'])) {
+                    ($options['success'])(new Response(200, [], '{}'));
+                }
+                return null;
+            }
+
+            public function getCapturedOptions(): array
+            {
+                return $this->capturedOptions;
+            }
+        };
+
+        $ref = new \ReflectionClass($provider);
+        $httpClient = $ref->getProperty('httpClient');
+        $httpClient->setAccessible(true);
+        $httpClient->setValue($provider, $fakeClient);
+
+        $noopFloat = $ref->getProperty('timerSleep');
+        $noopFloat->setAccessible(true);
+        $noopFloat->setValue($provider, static function (float $s): void {
+        });
+
+        $waitTick = $ref->getProperty('waitTick');
+        $waitTick->setAccessible(true);
+        $waitTick->setValue($provider, static function (): void {
+        });
+
+        $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
+
+        $captured = $fakeClient->getCapturedOptions();
+
+        // Option pin: the provider states the refusal explicitly.
+        $this->assertSame(
+            ['max' => 0],
+            $captured['allow_redirects'] ?? null,
+            'requestAndWait must send allow_redirects => [max => 0]; the library default (max 5)'
+                . ' re-issues X-MAL-CLIENT-ID to any redirect target, cross-origin included'
+        );
+
+        // REAL-library pin: with the captured options, the FIRST 3xx must make
+        // Workerman\Http\Request::redirect() refuse (false) — the follow-up
+        // request object is never even constructed, and the 3xx response then
+        // surfaces to the success callback (Client.php `!$new_request` branch),
+        // where handleResponseObject() treats it as a non-2xx failure.
+        $request = (new \Workerman\Http\Request('https://api.myanimelist.net/v2/anime/1'))
+            ->setOptions($captured);
+        $this->assertFalse(
+            \Workerman\Http\Request::redirect(
+                $request,
+                new Response(302, ['Location' => 'https://evil.example.test/steal'], '')
+            ),
+            'A 3xx must not produce a follow-up request under the provider options'
+        );
+
+        // Control pinning the vulnerability itself (documented leak vector):
+        // with only the library default options, redirect() DOES build the
+        // follow-up aimed at the hostile host, and its options still carry the
+        // credential header — which Request::end() applies there before send.
+        // If this ever returns false, the vendor changed its default and the
+        // explicit refusal above should be re-examined, so fail loudly.
+        $naive = (new \Workerman\Http\Request('https://api.myanimelist.net/v2/anime/1'))
+            ->setOptions(['headers' => ['X-MAL-CLIENT-ID' => 'test-id']]);
+        $leak = \Workerman\Http\Request::redirect(
+            $naive,
+            new Response(302, ['Location' => 'https://evil.example.test/steal'], '')
+        );
+        $this->assertInstanceOf(
+            \Workerman\Http\Request::class,
+            $leak,
+            'vendored redirect defaults changed — re-verify the allow_redirects law above'
+        );
+        $this->assertSame('evil.example.test', $leak->getUri()->getHost());
+        $this->assertSame(
+            'test-id',
+            $leak->getOptions()['headers']['X-MAL-CLIENT-ID'] ?? '(absent)',
+            'the follow-up options no longer carry the credential — vendor behavior changed'
+        );
+    }
+
+    /**
+     * Consequence guard for the refusal above: when the transport hands a bare
+     * 3xx to the success callback (exactly what happens with redirects
+     * refused), httpGetJson() must treat it as a failure — null, uncached —
+     * never decoding a redirect body as data.
+     */
+    public function test_http_get_json_returns_null_on_3xx(): void
+    {
+        $provider = $this->makeProvider([
+            '/anime/1' => new Response(302, ['Location' => 'https://evil.example.test/x'], '{"id":1}'),
+        ]);
+
+        $this->assertNull(
+            $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1'])
+        );
+    }
 }

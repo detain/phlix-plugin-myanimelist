@@ -10,7 +10,7 @@
 This plugin fetches structured anime metadata from [MyAnimeList](https://myanimelist.net/)
 using the official **MAL API v2** (`https://api.myanimelist.net/v2`):
 
-1. **Search** (`GET /anime?q=...`) — resolve a filename to a MAL anime ID
+1. **Search** (`GET /anime?q=...`) — resolve a title to a MAL anime ID (best match)
 2. **Details** (`GET /anime/{id}?fields=...`) — fetch titles, synopsis, episodes, rating, studio
 
 Every request carries an `X-MAL-CLIENT-ID` header with your MAL client ID.
@@ -65,18 +65,24 @@ Create an API application at [myanimelist.net/apiconfig](https://myanimelist.net
 
 ## How It Works
 
-When the MetadataManager calls `lookup($filePath)`:
+`onEnable` registers the {@see MyanimelistMetadataProviderAdapter} with the host's
+MetadataManager, which then drives the standard triad against the adapter:
 
-1. **Parse filename** — extract anime title from file path (strips S##E##, group tags, resolution suffixes)
-2. **Search** — `GET /anime?q=<title>&limit=10` and take the first result's ID
-3. **Fetch details** — `GET /anime/{id}?fields=...` for full anime data
-4. **Map response** — translate the MAL JSON layout to MetadataManager's expected return shape
+1. **Search** — `GET /anime?q=<title>&limit=10&fields=id,title,alternative_titles`. Every candidate
+   is scored against all of its titles (exact > prefix > contains, including English/Japanese/synonym
+   alternatives) and the single best match is returned — MAL's popularity ranking is not taken at
+   face value.
+2. **Details** — `GET /anime/{id}?fields=...` for full anime data.
+3. **Images** — poster (`main_picture`) + fanart (first `pictures` entry).
+
+The legacy `lookup($filePath)` entry point (filename parsing → search → details) is still
+implemented for interface parity, but the host does not call it.
 
 ## MAL API Notes
 
 - **Protocol**: REST/JSON over HTTPS to `https://api.myanimelist.net/v2`
 - **Auth**: every request sends `X-MAL-CLIENT-ID: <client_id>`
-- **Search**: `GET /anime?q=<query>&limit=10` → `{ "data": [ { "node": { "id", "title", ... } } ] }`
+- **Search**: `GET /anime?q=<query>&limit=10&fields=id,title,alternative_titles` → `{ "data": [ { "node": { "id", "title", ... } } ] }`
 - **Details**: `GET /anime/{id}?fields=id,title,main_picture,alternative_titles,start_date,synopsis,mean,num_scoring_users,genres,num_episodes,media_type,status,studios,average_episode_duration,rating,pictures` (`pictures` is what makes `fanart_url` possible — drop it and fanart silently becomes null)
 
 See the [MAL API v2 reference](https://myanimelist.net/apiconfig/references/api/v2) for full details.

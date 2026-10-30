@@ -76,7 +76,9 @@ final class MyanimelistMetadataProviderAdapter implements MetadataProviderInterf
      *
      * Resolves the query to a MAL ID via the wrapped provider's search path,
      * then returns it as a single best-match result in the host's expected
-     * shape. MAL's search API returns ranked results; we take the first.
+     * shape. Every candidate MAL returns is scored against all of its titles
+     * (exact > prefix > contains, incl. alternative titles); we return the
+     * single best-scoring match, not MAL's top-ranked row.
      *
      * @param string               $query   Search query (e.g. anime title).
      * @param array<string, mixed> $options Search options (year/language); unused

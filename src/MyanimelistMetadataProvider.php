@@ -389,7 +389,8 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      *
      * @param string $title Anime title to search for.
      *
-     * @return int|null MAL anime ID of the first result, or null if none.
+     * @return int|null Best-scoring MAL anime ID (scored across every candidate's
+     *     titles), or null if none.
      */
     public function findIdByTitle(string $title): ?int
     {
@@ -444,8 +445,9 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     /**
      * Return the PSR-14 listener subscriptions this plugin wants.
      *
-     * This plugin is invoked directly by MetadataManager via lookup()
-     * rather than through the PSR-14 event dispatcher, so no subscriptions.
+     * The host invokes this plugin through the adapter registered in
+     * {@see onEnable()} — search()/getDetails()/getImages() — rather than
+     * through the PSR-14 event dispatcher, so no subscriptions.
      *
      * @return array<class-string, string|callable> Empty for this plugin.
      */

@@ -1286,6 +1286,43 @@ final class MyanimelistTransportTest extends TestCase
         $this->assertLessThan($now + 5.0, $until);
     }
 
+    /**
+     * PG-060 (review plugin-mal__srphp #13[i]): the docblock claims the
+     * HTTP-date branch parses STRICTLY against the RFC 7231 fixed shape, but
+     * createFromFormat resolves a contradictory weekday by silently shifting
+     * the day forward until it matches (reproduced: "Sat" against a Friday
+     * date parsed one day ahead, delta ~86400s — clamped, that parks the
+     * resident worker for the full 300s cap on a malformed header). Strict
+     * means canonical: a contradictory HTTP-date falls back to the default
+     * interval, never to the parser-shifted instant.
+     */
+    public function test_retry_after_http_date_with_contradictory_weekday_uses_default_interval(): void
+    {
+        $weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+        $header = (new \DateTimeImmutable('now + 90 seconds', new \DateTimeZone('UTC')))
+            ->format(\DateTimeInterface::RFC7231);
+        $trueWeekday = substr($header, 0, 3);
+        // Name the FOLLOWING weekday for the same date — the header is
+        // self-contradictory whatever day the suite runs on.
+        $corrupt = $weekdays[(array_search($trueWeekday, $weekdays, true) + 1) % 7] . substr($header, 3);
+
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(429, ['Retry-After' => $corrupt], '{}'),
+        ]);
+
+        $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+
+        $until = $this->retryAfterUntil($provider);
+        $now = microtime(true);
+
+        $this->assertGreaterThan($now, $until, 'the safe default back-off is still armed');
+        $this->assertLessThan(
+            $now + 5.0,
+            $until,
+            'a contradictory HTTP-date must not park the worker ~300s on the parser-shifted instant'
+        );
+    }
+
     private function retryAfterUntil(MyanimelistMetadataProvider $provider): float
     {
         $prop = new \ReflectionProperty($provider, 'retryAfterUntil');

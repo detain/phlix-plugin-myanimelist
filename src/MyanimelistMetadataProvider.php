@@ -171,6 +171,14 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     private array $settings;
 
     /**
+     * The Client ID exactly as validated by the constructor boundary —
+     * non-empty, printable ASCII (RFC 9110 field-value). Request construction
+     * uses this parsed value directly instead of re-trusting the settings
+     * array with fresh null-coalesce hedges on every request.
+     */
+    private string $clientId;
+
+    /**
      * Unix timestamp (with microseconds) of the last API request, for rate limiting.
      */
     private float $lastRequestTimestamp = 0.0;
@@ -282,6 +290,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             );
         }
 
+        $this->clientId = $clientId;
         $this->settings = $settings;
         $this->clock = static fn(): float => microtime(true);
         $this->timerSleep = static function (float $seconds): void {
@@ -560,6 +569,12 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * Parses the filename to extract a clean anime title, searches MAL for a
      * matching anime ID, fetches full details, and returns structured metadata.
      *
+     * @deprecated since v0.3.0 — the host does not call this entry point; the
+     *     live path is the adapter triad ({@see MyanimelistMetadataProviderAdapter})
+     *     plus SourceRegistry, as the README states. Kept for interface parity
+     *     only; removal is planned for the next minor release (v0.4.0), at
+     *     which point the filename corpus it alone exercises goes too.
+     *
      * @param string $filePath Absolute filesystem path of the media item.
      *
      * @return array{
@@ -689,7 +704,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     private function requestAndWait(string $url): ?Response
     {
         $headers = [
-            self::CLIENT_ID_HEADER => (string) ($this->settings['client_id'] ?? ''),
+            self::CLIENT_ID_HEADER => $this->clientId,
             'Accept' => 'application/json',
         ];
 
@@ -917,6 +932,11 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * deliberately NOT a loose `strtotime()` grammar, which accepts relative
      * junk a server should never send.
      *
+     * Malformed and non-canonical dates — weekday contradicting the calendar
+     * fields, stray spacing — are refused exactly like unparseable ones: the
+     * parse must reproduce the header verbatim on a canonical RFC 7231
+     * re-render to be accepted.
+     *
      * The recorded delay is bounded: non-finite numeric strings (e.g.
      * `1e999`, which overflows to INF), unparseable dates and dates already
      * in the past fall back to the default interval, and finite values are
@@ -953,7 +973,15 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
                     $retryAfter,
                     new \DateTimeZone('UTC')
                 );
-                if ($when !== false) {
+                // Strictness made real (PG-060): createFromFormat resolves a
+                // contradictory weekday by shifting the DAY forward to the
+                // next date matching the named weekday — silently yielding a
+                // different instant than the calendar fields describe. A
+                // truthful RFC 7231 parse must be canonical: accept the
+                // result only when the formatted round-trip reproduces the
+                // header verbatim. Contradictory or non-canonical dates then
+                // take the same safe-default path as unparseable ones.
+                if ($when !== false && $when->format(\DateTimeInterface::RFC7231) === $retryAfter) {
                     $candidate = (float) ($when->getTimestamp() - (int) floor(($this->clock)()));
                     if (is_finite($candidate) && $candidate > 0.0) {
                         $delaySeconds = min($candidate, self::MAX_RETRY_AFTER_SEC);
@@ -1353,6 +1381,10 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * Uses heuristics: strips S##E## patterns, group tags, file extensions,
      * resolution suffixes, etc.
      *
+     * @deprecated since v0.3.0 — exercised only by the legacy
+     *     {@see lookup()} path the host no longer calls (PG-057); removal is
+     *     planned for v0.4.0 together with it.
+     *
      * @param string $filePath Absolute path to media file.
      *
      * @return string|null Extracted title or null if no clear match.
@@ -1362,47 +1394,54 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         /** @var string $filename pathinfo() returns string|false, never null for PATHINFO_FILENAME */
         $filename = pathinfo($filePath, PATHINFO_FILENAME) ?: '';
 
+        // Every strip coerces its result to string: preg_replace() returns
+        // null only on a PCRE runtime error, and (string) null === '' —
+        // byte-identical to the per-step `?? ''` hedges these lines carried
+        // (PG-058). Subjects are therefore string by construction.
         // Strip common release group patterns: [GroupName], (TX), (...)
-        $clean = preg_replace('/\[[^\]]+\]/', '', $filename ?? '');
-        $clean = preg_replace('/\(TX\)/', '', $clean ?? '');
-        $clean = preg_replace('/\([^\)]+\)/', '', $clean ?? '');
+        $clean = (string) preg_replace('/\[[^\]]+\]/', '', $filename);
+        $clean = (string) preg_replace('/\(TX\)/', '', $clean);
+        $clean = (string) preg_replace('/\([^\)]+\)/', '', $clean);
 
         // Strip episode patterns: S01E02, 01x02, Episode 01, Episode.01
         // (standalone episode strip happens AFTER resolution/codec/source strip below)
-        $clean = preg_replace('/[Ss]\d{1,2}[Ee]\d{1,4}/', '', $clean ?? '');
-        $clean = preg_replace('/\d{1,2}[Xx]\d{1,4}/', '', $clean ?? '');
-        $clean = preg_replace('/(?:^|[.\-_ ])[Ee]p?[i]?[t]?[.]?\d{1,4}\b/i', '', $clean ?? '');
+        $clean = (string) preg_replace('/[Ss]\d{1,2}[Ee]\d{1,4}/', '', $clean);
+        $clean = (string) preg_replace('/\d{1,2}[Xx]\d{1,4}/', '', $clean);
+        $clean = (string) preg_replace('/(?:^|[.\-_ ])[Ee]p?[i]?[t]?[.]?\d{1,4}\b/i', '', $clean);
 
         // Strip common suffixes: 720p, 1080p, BluRay, HDTV, etc.
         // MUST run before standalone-episode strip so episode numbers become genuinely trailing
-        $clean = preg_replace('/(720p|1080p|2160p|480p|BluRay|BRRip|HDRip|HDTV|DVDRip|x264|x265|HEVC|AAC|AC3)/i', '', $clean ?? '');
+        $clean = (string) preg_replace(
+            '/(720p|1080p|2160p|480p|BluRay|BRRip|HDRip|HDTV|DVDRip|x264|x265|HEVC|AAC|AC3)/i',
+            '',
+            $clean
+        );
 
         // Collapse any consecutive dots left behind by resolution/codec stripping
         // (e.g. ".720p.BluRay.x264" → "..." then → ".")
-        $clean = preg_replace('/\.{2,}/', '.', $clean ?? '');
+        $clean = (string) preg_replace('/\.{2,}/', '.', $clean);
 
         // Strip year patterns: (2016), trailing 2001/2023
-        $clean = preg_replace('/\(\d{4}\)/', '', $clean ?? '');
-        $clean = preg_replace('/\s+\d{4}$/', '', $clean ?? '');
+        $clean = (string) preg_replace('/\(\d{4}\)/', '', $clean);
+        $clean = (string) preg_replace('/\s+\d{4}$/', '', $clean);
 
         // Strip resolution and codec patterns (e.g. 1920x1080)
-        $clean = preg_replace('/\d{3,4}[xX]\d{3,4}/', '', $clean ?? '');
+        $clean = (string) preg_replace('/\d{3,4}[xX]\d{3,4}/', '', $clean);
 
         // Strip leading/trailing dashes, dots, underscores, spaces
         // Must happen BEFORE standalone-episode strip so trailing separators don't block episode detection
-        $clean = trim((string) $clean, '.-_ ');
+        $clean = trim($clean, '.-_ ');
 
         // Strip standalone episode numbers: leading separator before 1-4 digits at end
         // Now genuinely trailing after resolution/codec/source has been stripped
-        // ($clean is a definite string since the trim above, so no ?? hedge).
-        $clean = preg_replace('/[.\- ][0-9]{1,4}$/', '', $clean);
+        $clean = (string) preg_replace('/[.\- ][0-9]{1,4}$/', '', $clean);
 
         // Re-trim: the strips above (episode number most visibly) detach text
         // from the right end and can leave a dangling separator —
         // 'My Hero Academia - 05' becomes 'My Hero Academia -' here, which the
         // pre-episode trim (running BEFORE these strips) could not have caught.
         // Without this, the dangling ' -' rides into the MAL query verbatim.
-        $clean = trim((string) $clean, '.-_ ');
+        $clean = trim($clean, '.-_ ');
 
         // Replace remaining dots with spaces (common in anime filenames)
         $clean = str_replace('.', ' ', $clean);
@@ -1428,6 +1467,8 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * opaquely, so no server-side code pins these key names.
      *
      * @param array<string, mixed> $anime Parsed from parseAnimeResponse().
+     *     Every key read below is set by that boundary (PG-058), so values
+     *     are trusted as-is — no post-condition coalescing.
      *
      * @return array<string, mixed> Mapped metadata array (17 fixed keys).
      */
@@ -1459,20 +1500,27 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             'rating'        => $anime['rating'],
             'vote_count'    => $anime['vote_count'],
             'poster_url'    => $anime['poster_url'],
-            'fanart_url'    => $anime['fanart_url'] ?? null,
+            'fanart_url'    => $anime['fanart_url'],
             'episodes'      => ($anime['episodes'] ?? 0) > 0 ? $anime['episodes'] : null,
-            'type'          => $this->mapType($anime['media_type'] ?? null),
+            'type'          => $this->mapType($anime['media_type']),
             'mal_id'        => $anime['id'],
             'titles'        => array_values(array_unique($allTitles)),
-            'status'        => $this->mapStatus($anime['status'] ?? null),
-            'runtime_ticks' => $this->mapRuntimeTicks($anime['episode_length'] ?? null),
+            'status'        => $this->mapStatus($anime['status']),
+            'runtime_ticks' => $this->mapRuntimeTicks($anime['episode_length']),
             'studio'        => $anime['studio'],
-            'adult_rating'  => $anime['adult_rating'] ?? null,
+            'adult_rating'  => $anime['adult_rating'],
         ];
     }
 
     /**
      * Map a MAL `media_type` value to a normalized type string.
+     *
+     * Normalization is intentionally pass-through-lowercase: the MAL v2
+     * media_type vocabulary (tv, ova, movie, special, ona, music) already
+     * arrives lowercase, so the former named match-arms were all identity
+     * (PG-059 — documented as prose, not as a no-op table). A future mapping
+     * onto the host media-type vocabulary (e.g. MAL tv → host series) belongs
+     * HERE, as a real transformation with its own pinned tests.
      *
      * @param mixed $mediaType Raw MAL media_type (e.g. "tv", "movie").
      *
@@ -1488,15 +1536,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             return null;
         }
 
-        return match (strtolower($mediaType)) {
-            'tv'                 => 'tv',
-            'movie'              => 'movie',
-            'ova'                => 'ova',
-            'special'            => 'special',
-            'ona'                => 'ona',
-            'music'              => 'music',
-            default              => strtolower($mediaType),
-        };
+        return strtolower($mediaType);
     }
 
     /**

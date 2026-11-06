@@ -861,6 +861,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
             'media_type'     => 'tv',
             'status'         => 'finished_airing',
             'studio'         => null,
+            'adult_rating'   => null,
             'episode_length' => null,
         ];
 
@@ -943,10 +944,12 @@ final class MyanimelistMetadataProviderTest extends TestCase
             'rating'         => null,
             'vote_count'     => null,
             'poster_url'     => null,
+            'fanart_url'     => null,
             'episodes'       => 1,
             'media_type'     => 'movie',
             'status'         => 'finished_airing',
             'studio'         => null,
+            'adult_rating'   => null,
             'episode_length' => null,
         ];
 
@@ -973,10 +976,12 @@ final class MyanimelistMetadataProviderTest extends TestCase
             'rating'         => null,
             'vote_count'     => null,
             'poster_url'     => null,
+            'fanart_url'     => null,
             'episodes'       => 0,
             'media_type'     => 'tv',
             'status'         => 'currently_airing',
             'studio'         => null,
+            'adult_rating'   => null,
             'episode_length' => null,
         ];
 

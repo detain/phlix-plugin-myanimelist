@@ -24,7 +24,9 @@ Every request carries an `X-MAL-CLIENT-ID` header with your MAL client ID.
 - **No SDK** — plain HTTP/JSON against the MAL REST API via the vendored
   [`workerman/http-client`](https://github.com/walkor/http-client) async client
   (`Workerman\Http\Client` over pooled HTTPS), not PHP stream wrappers. Runtime
-  requires: `workerman/http-client`, `detain/phlix-shared`, `psr/container`,
+  requires: `workerman/http-client`, `workerman/workerman` (the async client's
+  timer — `Workerman\Timer::sleep()` is used directly for rate-limit pauses),
+  `detain/phlix-shared`, `psr/container`,
   `psr/log` — see `composer.json` (which is why Install step 4 runs `composer install`).
 
 ## Install
@@ -79,8 +81,10 @@ MetadataManager, which then drives the standard triad against the adapter:
 2. **Details** — `GET /anime/{id}?fields=...` for full anime data.
 3. **Images** — poster (`main_picture`) + fanart (first `pictures` entry).
 
-The legacy `lookup($filePath)` entry point (filename parsing → search → details) is still
-implemented for interface parity, but the host does not call it.
+The legacy `lookup($filePath)` entry point (filename parsing → search → details) is
+**deprecated**: the host does not call it — the live path is the adapter triad above.
+It remains implemented only for interface parity and is scheduled for removal in
+v0.4.0.
 
 ## MAL API Notes
 

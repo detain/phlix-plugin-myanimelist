@@ -2086,4 +2086,103 @@ final class MyanimelistMetadataProviderTest extends TestCase
             'rating'                   => 'r',
         ], JSON_UNESCAPED_UNICODE) ?: '{}';
     }
+
+    // -------------------------------------------------------------------------
+    // PG-171: disabled latch — the orphaned host registration goes inert
+    // -------------------------------------------------------------------------
+
+    /**
+     * Build a provider whose transport is a counting LIVE probe: it answers a
+     * perfectly matching MAL search payload and a fully parseable details
+     * payload, and records every URL that reached it. Any entry in the
+     * transport log after {@see onDisable()} is a request the disabled plugin
+     * should never have made.
+     *
+     * The host-side vector this models: onEnable() registers the adapter with
+     * the server's MetadataManager, whose provider map has NO removal API —
+     * after disable the adapter object stays registered and keeps driving
+     * this instance's two public bridge calls with its stored Client ID.
+     */
+    private function makeCountingProbeProvider(): MyanimelistMetadataProvider
+    {
+        $provider = new class (['client_id' => 'test-id']) extends MyanimelistMetadataProvider {
+            /** @var list<string> URLs that reached the transport layer. */
+            public array $transportUrls = [];
+
+            protected function httpGetJson(string $url): ?array
+            {
+                $this->transportUrls[] = $url;
+
+                if (str_contains($url, '/anime?q=')) {
+                    return ['data' => [['node' => ['id' => 21, 'title' => 'Hellsing']]]];
+                }
+
+                return [
+                    'id'           => 21,
+                    'title'        => 'Hellsing',
+                    'main_picture' => ['large' => 'https://cdn.myanimelist.net/images/hellsing.jpg'],
+                    'pictures'     => [],
+                ];
+            }
+        };
+
+        return $provider;
+    }
+
+    /**
+     * Control pin: before disable the bridge is fully live — the latch must
+     * start open and only ever be closed by onDisable(), never by construction.
+     */
+    public function test_control_bridge_is_live_before_disable(): void
+    {
+        $provider = $this->makeCountingProbeProvider();
+
+        $this->assertSame(21, $provider->findIdByTitle('Hellsing'));
+        $this->assertNotSame([], $provider->fetchAnimeMetadata(21));
+        $this->assertCount(2, $provider->transportUrls, 'live bridge must reach the transport');
+    }
+
+    public function test_find_id_by_title_is_inert_after_on_disable(): void
+    {
+        $provider = $this->makeCountingProbeProvider();
+        $provider->onDisable();
+        $provider->transportUrls = [];
+
+        $this->assertNull($provider->findIdByTitle('Hellsing'));
+        $this->assertSame(
+            [],
+            $provider->transportUrls,
+            'a disabled provider must not issue MAL requests through findIdByTitle()',
+        );
+    }
+
+    public function test_fetch_anime_metadata_is_inert_after_on_disable(): void
+    {
+        $provider = $this->makeCountingProbeProvider();
+        $provider->onDisable();
+        $provider->transportUrls = [];
+
+        $this->assertSame([], $provider->fetchAnimeMetadata(21));
+        $this->assertSame(
+            [],
+            $provider->transportUrls,
+            'a disabled provider must not issue MAL requests through fetchAnimeMetadata()',
+        );
+    }
+
+    /**
+     * The latch is per-instance and permanent: re-enable builds a FRESH
+     * instance (the server's PluginLoader re-instantiates the entry class),
+     * so a disabled instance must never flip back to live on its own.
+     */
+    public function test_disabled_latch_is_permanent_for_the_orphaned_instance(): void
+    {
+        $provider = $this->makeCountingProbeProvider();
+        $provider->onDisable();
+        $provider->transportUrls = [];
+
+        $this->assertNull($provider->findIdByTitle('Hellsing'));
+        $this->assertNull($provider->findIdByTitle('Hellsing'));
+        $this->assertSame([], $provider->transportUrls);
+    }
 }

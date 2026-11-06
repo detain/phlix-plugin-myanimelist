@@ -13,7 +13,7 @@ using the official **MAL API v2** (`https://api.myanimelist.net/v2`):
 1. **Search** (`GET /anime?q=...`) — resolve a title to a MAL anime ID (best match)
 2. **Details** (`GET /anime/{id}?fields=...`) — fetch titles, synopsis, episodes, rating, studio
 
-Every request carries an `X-MAL-CLIENT-ID` header with your MAL client ID.
+Every request carries an `X-MAL-CLIENT-ID` header with your MAL Client ID.
 
 ## Features
 
@@ -42,7 +42,7 @@ The plugin is unsigned by design. Install via the Phlix admin UI:
    ```
 
 4. The server downloads and validates the manifest, runs `composer install --no-dev`, and stores a row in the `plugins` table.
-5. Configure your MyAnimeList client ID in the plugin settings form.
+5. Configure your MyAnimeList Client ID in the plugin settings form.
 6. Enable the plugin.
 
 ### Getting a MAL Client ID
@@ -108,7 +108,9 @@ v0.4.0.
   synonym alternatives disappear), and `adult_rating` vanishes. Every key
   the parsers read is requested; if you edit `DETAIL_FIELDS` or the search
   `fields=`, keep the consumed set complete.
-- **Rate limiting**: ~1 request/second; a `Retry-After` on 429/503 is honored
+- **Rate limiting**: ~1 request/second per resident worker (the limiter is
+  process-local, so a server pool of N workers can present up to N/s to MAL);
+  a `Retry-After` on 429/503 is honored
   but clamped to 300s (non-finite header values fall back to the default
   interval) so one pathological response can never park a resident worker
 - **Caching**: decoded 2xx bodies are cached per URL for 1h (TTL) with the
@@ -148,7 +150,7 @@ A no-match returns `[]`.
 This plugin is based on [`phlix-plugin-example`](https://github.com/detain/phlix-plugin-example). To create your own metadata provider:
 
 1. Fork or copy this repository.
-2. Edit `plugin.json` — pick a new `name` (must start with `phlix-plugin-`), set `version` to your own starting version (a new fork begins its own line, e.g. `0.1.0` — this repository is already at `0.3.0`, so "start at 0.1.0" is a fresh line, not a downgrade), change `entry` to your FQCN.
+2. Edit `plugin.json` — pick a new `name` (must start with `phlix-plugin-`) and change `entry` to your FQCN. Set `version` to your own starting version (a new fork begins its own version line, e.g. `0.1.0`). This repository is already at `0.3.0`.
 3. Edit `composer.json` — rename the package, update PSR-4 autoload prefix.
 4. Replace `src/MyanimelistMetadataProvider.php` with your own implementation — and handle `src/MyanimelistMetadataProviderAdapter.php` too: its `use` statements and type-hints pin the provider FQCN, so it must be replaced or renamed along with the provider it wraps.
 5. Run tests: `composer install && vendor/bin/phpunit`.

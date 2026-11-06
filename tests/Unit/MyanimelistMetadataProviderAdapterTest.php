@@ -529,10 +529,19 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // onDisable via provider
+    // onDisable via provider — PG-171: the orphaned adapter must go inert
     // -------------------------------------------------------------------------
 
-    public function test_adapter_works_after_provider_on_disable(): void
+    /**
+     * Formerly pinned the OLD behavior ("Adapter should still work (it fetches
+     * fresh data)") — this is the bug-encoding test the PG-171 review caught:
+     * the host MetadataManager never removes a registered provider, so an
+     * adapter that keeps answering after disable is an orphan consuming the
+     * API with the stored Client ID behind the disabled plugin's back.
+     * New law: onDisable() latches the instance; every adapter call routed
+     * through it returns empty without touching the transport.
+     */
+    public function test_orphaned_adapter_is_inert_after_provider_on_disable(): void
     {
         $provider = $this->makeProviderWithProbe([
             'https://api.myanimelist.net/v2/anime/1' => [
@@ -545,11 +554,70 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
 
         $adapter = new MyanimelistMetadataProviderAdapter($provider);
 
-        // Clear cache via onDisable
         $provider->onDisable();
 
-        // Adapter should still work (it fetches fresh data)
-        $result = $adapter->getImages('1');
-        $this->assertArrayHasKey('poster', $result);
+        $this->assertSame([], $adapter->getDetails('1'));
+        $this->assertSame([], $adapter->getImages('1'));
+    }
+
+    /**
+     * Full host-shape conviction: the adapter captured at registration (the
+     * exact object the host keeps in its provider map after disable, since
+     * MetadataManager has no removal API) must be inert across all three
+     * host-facing entry points once the provider is disabled.
+     */
+    public function test_registered_orphan_adapter_inert_across_full_triad_after_disable(): void
+    {
+        $managerClass = 'Phlix\\Media\\Metadata\\MetadataManager';
+
+        $manager = new class {
+            /** @var object|null */
+            public ?object $registered = null;
+
+            public function registerProvider(string $name, object $provider, array $supportedTypes = []): void
+            {
+                $this->registered = $provider;
+            }
+        };
+
+        $container = $this->createMock(ContainerInterface::class);
+        $container->method('has')
+            ->willReturnCallback(static fn (string $id): bool => $id === $managerClass);
+        $container->method('get')
+            ->willReturnCallback(static function (string $id) use ($managerClass, $manager) {
+                if ($id === $managerClass) {
+                    return $manager;
+                }
+                throw new \RuntimeException('unexpected container id: ' . $id);
+            });
+
+        $provider = $this->makeProviderWithProbe([
+            'https://api.myanimelist.net/v2/anime?q=' => [
+                'data' => [['node' => ['id' => 1, 'title' => 'Test']]],
+            ],
+            'https://api.myanimelist.net/v2/anime/1' => [
+                'id' => 1,
+                'title' => 'Test',
+                'main_picture' => ['large' => 'p.jpg'],
+                'pictures' => [],
+            ],
+        ]);
+
+        $ref = new \ReflectionMethod($provider, 'registerWithMetadataManager');
+        $ref->setAccessible(true);
+        $ref->invoke($provider, $container);
+
+        $adapter = $manager->registered;
+        $this->assertInstanceOf(MyanimelistMetadataProviderAdapter::class, $adapter);
+
+        // Proof the probe payload is live for this adapter before disable —
+        // otherwise the post-disable emptiness below would be vacuous.
+        $this->assertArrayHasKey('poster', $adapter->getImages('1'));
+
+        $provider->onDisable();
+
+        $this->assertSame([], $adapter->search('Test'));
+        $this->assertSame([], $adapter->getDetails('1'));
+        $this->assertSame([], $adapter->getImages('1'));
     }
 }

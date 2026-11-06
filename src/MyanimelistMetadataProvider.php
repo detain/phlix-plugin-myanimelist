@@ -58,7 +58,7 @@ use Workerman\Timer;
  *
  * ## Configuration (plugin.json settings)
  *
- * - client_id: MyAnimeList API client ID (required, secret)
+ * - client_id: MyAnimeList API Client ID (required, secret)
  * - use_ssl_verification: verify TLS certificates (optional, default true)
  *
  * ## Protocol notes
@@ -86,7 +86,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     private const API_HOST = 'api.myanimelist.net';
 
     /**
-     * Header name carrying the MAL client ID on every request.
+     * Header name carrying the MAL Client ID on every request.
      */
     private const CLIENT_ID_HEADER = 'X-MAL-CLIENT-ID';
 
@@ -208,6 +208,23 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     private array $cache = [];
 
     /**
+     * PG-171 lifecycle latch, closed by {@see onDisable()}.
+     *
+     * {@see onEnable()} registers a host adapter with the server's
+     * MetadataManager, whose provider map exposes NO removal API: after a
+     * disable the adapter object stays registered and would otherwise keep
+     * driving this instance's two public bridge calls
+     * ({@see findIdByTitle()} / {@see fetchAnimeMetadata()}) — an orphan
+     * consuming the MAL API with the stored Client ID behind the disabled
+     * plugin's back. While latched, both bridge calls return empty without
+     * touching transport, so the orphaned adapter surface goes inert
+     * immediately. The latch is per-instance and permanent: re-enable builds a
+     * FRESH provider instance (the server re-instantiates the entry class), so
+     * this flag never needs to open again.
+     */
+    private bool $disabled = false;
+
+    /**
      * Clock used for time measurements in rate limiting.
      *
      * @var \Closure(): float
@@ -254,7 +271,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     /**
      * @param array{client_id: string, use_ssl_verification?: bool} $settings
      *     Plugin settings from plugin.json. client_id is the MyAnimeList API
-     *     client ID, sent as the X-MAL-CLIENT-ID header on every request.
+     *     Client ID, sent as the X-MAL-CLIENT-ID header on every request.
      *     use_ssl_verification toggles TLS certificate verification (default true).
      *
      * @throws \InvalidArgumentException
@@ -490,10 +507,16 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * @param string $title Anime title to search for.
      *
      * @return int|null Best-scoring MAL anime ID (scored across every candidate's
-     *     titles), or null if none.
+     *     titles), or null if none — including always after {@see onDisable()},
+     *     which latches this instance against the orphaned host adapter
+     *     ({@see $disabled}).
      */
     public function findIdByTitle(string $title): ?int
     {
+        if ($this->disabled) {
+            return null;
+        }
+
         $trimmed = trim($title);
         if ($trimmed === '') {
             return null;
@@ -513,10 +536,16 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      *
      * @param int $malId MAL anime ID.
      *
-     * @return array<string, mixed> Mapped metadata array, or `[]` when not found.
+     * @return array<string, mixed> Mapped metadata array, or `[]` when not
+     *     found — including always after {@see onDisable()}, which latches
+     *     this instance against the orphaned host adapter ({@see $disabled}).
      */
     public function fetchAnimeMetadata(int $malId): array
     {
+        if ($this->disabled) {
+            return [];
+        }
+
         if ($malId <= 0) {
             return [];
         }
@@ -543,10 +572,21 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * it along with its pool. The "no open sockets" claim that used to live
      * here was true only pre-first-request.
      *
+     * The hook ALSO closes the PG-171 lifecycle latch: the host-side
+     * MetadataManager has no provider-removal API, so the adapter registered
+     * by {@see onEnable()} survives this call and remains reachable by host
+     * metadata refreshes. Latching makes the two bridge calls the adapter
+     * routes through ({@see findIdByTitle()} / {@see fetchAnimeMetadata()})
+     * return empty without touching transport, so the orphaned registration
+     * can no longer consume the API with this plugin's Client ID. The latch
+     * is per-instance and permanent: a later re-enable operates on a fresh
+     * instance built by the loader.
+     *
      * @return void
      */
     public function onDisable(): void
     {
+        $this->disabled = true;
         $this->cache = [];
     }
 

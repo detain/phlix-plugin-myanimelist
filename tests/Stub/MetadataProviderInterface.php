@@ -1,7 +1,8 @@
 <?php
 
 /**
- * Stub Metadataproviderinterface.
+ * Test-only stub declaring the host metadata-provider interface, which lives
+ * in the server and is absent from this repository's dependencies.
  *
  * @copyright 2026 Joe Huss <detain@interserver.net>
  * @license   MIT

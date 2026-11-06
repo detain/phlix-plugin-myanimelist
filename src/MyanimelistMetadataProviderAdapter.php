@@ -1,7 +1,8 @@
 <?php
 
 /**
- * Myanimelistmetadataprovideradapter.
+ * Adapter bridging the MyAnimeList provider to the host MetadataManager
+ * source contract (the search / details / images triad).
  *
  * @copyright 2026 Joe Huss <detain@interserver.net>
  * @license   MIT

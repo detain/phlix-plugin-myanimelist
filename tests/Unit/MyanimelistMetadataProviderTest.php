@@ -1,7 +1,8 @@
 <?php
 
 /**
- * Unit Myanimelistmetadataprovidertest.
+ * Unit tests for the MyAnimeList metadata provider: filename parsing, response
+ * mapping, title scoring, rate-limit back-off, and host registration.
  *
  * @copyright 2026 Joe Huss <detain@interserver.net>
  * @license   MIT
@@ -327,11 +328,16 @@ final class MyanimelistMetadataProviderTest extends TestCase
     {
         $container = $this->createMock(ContainerInterface::class);
         $container->method('has')->willReturn(false);
+        // Real contract: with no MetadataManager present, onEnable() must
+        // short-circuit at the has() guard and never resolve anything through
+        // the container's get() path. The "cheap wire step" only touches the
+        // container when the manager is actually there; the next test measures
+        // that this stays off the network/rate-limit path.
+        $container->expects($this->never())->method('get');
 
         $provider = $this->makeProvider();
         // Should not throw even without MetadataManager present
         $provider->onEnable($container);
-        $this->assertTrue(true);
     }
 
     /**
@@ -377,10 +383,23 @@ final class MyanimelistMetadataProviderTest extends TestCase
     {
         $managerClass = 'Phlix\\Media\\Metadata\\MetadataManager';
 
-        // A manager object that exists but lacks registerProvider method
+        // A manager object that exists but lacks registerProvider method. The
+        // __call sentinel records any attempt to invoke an undefined method, so
+        // the test can assert registerWithMetadataManager() returned early at
+        // the method_exists() guard instead of calling registerProvider() on a
+        // manager that does not implement it (which __call would otherwise
+        // swallow silently, turning the "noop" claim into theater).
         $brokenManager = new class {
+            /** @var int Count of invocations of methods this stub does not define. */
+            public int $unknownMethodCalls = 0;
+
             public function someOtherMethod(): void
             {
+            }
+
+            public function __call(string $name, array $arguments): void
+            {
+                $this->unknownMethodCalls++;
             }
         };
 
@@ -400,9 +419,16 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $ref = new \ReflectionMethod($provider, 'registerWithMetadataManager');
         $ref->setAccessible(true);
 
-        // Must not throw - should detect missing registerProvider and return early
+        // Must not throw - should detect the missing registerProvider() and
+        // return early. Asserting the sentinel stays at zero proves the guard
+        // actually short-circuited (a bare "didn't throw" would also pass if the
+        // call silently fell through to __call).
         $ref->invoke($provider, $container);
-        $this->assertTrue(true);
+        $this->assertSame(
+            0,
+            $brokenManager->unknownMethodCalls,
+            'registerWithMetadataManager() must not invoke registerProvider() on a manager that lacks it',
+        );
     }
 
     public function test_lookup_returns_empty_for_unparseable_filename(): void
@@ -1114,9 +1140,16 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $provider = $this->makeProvider();
         $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
 
-        // Should not throw
         $provider->setLogger($logger);
-        $this->assertTrue(true);
+
+        // Real contract: setLogger() retains the injected PSR-3 logger so the
+        // request paths can emit through it later. Assert identity of the stored
+        // private property rather than the vacuous "the call did not throw".
+        $this->assertSame(
+            $logger,
+            $this->readPrivate($provider, 'logger'),
+            'setLogger() must store the injected logger instance',
+        );
     }
 
     // -------------------------------------------------------------------------

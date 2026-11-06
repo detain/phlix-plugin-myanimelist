@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/detain/phlix-plugin-myanimelist/actions/workflows/test.yml/badge.svg)](https://github.com/detain/phlix-plugin-myanimelist/actions/workflows/test.yml)
 
-> MyAnimeList metadata provider plugin for [Phlix](https://github.com/detain/phlix)
+> MyAnimeList metadata provider plugin for [Phlix](https://github.com/detain/phlix-server)
 > — anime titles, descriptions, episodes, ratings via the MyAnimeList API v2.
 
 ## Overview
@@ -137,6 +137,7 @@ See the [MAL API v2 reference](https://myanimelist.net/apiconfig/references/api/
     'status'        => 'Finished',               // Finished / Currently Airing / Upcoming
     'runtime_ticks' => 14400000000,              // Avg episode length in ticks (1s = 10,000,000)
     'studio'        => 'Sunrise',                // First studio name
+    'adult_rating'  => 'pg-13',                  // MAL classification: g / pg-13 / r-17 / rx — host-side gating input; null if `rating` was trimmed from `fields=`
 ]
 ```
 
@@ -167,8 +168,12 @@ JSON — no live network calls are made; the HTTP paths covered by
 `\Workerman\Http\Client` subclasses instead.
 
 `phpunit.xml` declares a Cobertura report, so a run with a coverage driver also
-writes `coverage.xml`; `.github/workflows/test.yml` runs the suite on PHP `8.3`
-and `8.4` and uploads that file to Codacy.
+writes `coverage.xml`. `.github/workflows/test.yml` runs the suite on PHP `8.3`
+and `8.4`; it then uploads that file to Codacy **only when** the repository
+custom variable `CODACY_COVERAGE_ENABLED` is set to `true`. That switch is
+fail-closed and currently disarmed — the upload step renders as SKIPPED —
+pending the owner restoring Codacy write access (see the rationale comment
+in `.github/workflows/test.yml`).
 
 ### Static analysis (PHPStan level 9)
 

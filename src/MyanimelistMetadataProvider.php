@@ -1,7 +1,8 @@
 <?php
 
 /**
- * Myanimelistmetadataprovider.
+ * MyAnimeList metadata provider: resolves anime by title via the MAL API v2
+ * search endpoint and maps detail responses onto the host metadata contract.
  *
  * @copyright 2026 Joe Huss <detain@interserver.net>
  * @license   MIT
@@ -798,8 +799,9 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      *
      * Called by {@see httpGetJson()} once {@see requestAndWait()} resolves a
      * response. It reads the status code directly from the Response object and
-     * extracts the body string for JSON decoding. Retains all B5 semantics
-     * (429/503 back-off, non-2xx → null, JSON object cache validation).
+     * extracts the body string for JSON decoding, preserving the 429/503
+     * back-off, non-2xx → null, and cache-on-2xx-only JSON-object validation
+     * policy.
      *
      * @param string    $cacheKey  In-memory cache key (md5 of URL).
      * @param Response  $response  Workerman HTTP Response object.
@@ -1037,7 +1039,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * Japanese + synonyms) to select the best candidate, rather than blindly
      * returning the first MAL search result.
      *
-     * Scoring algorithm (per anidb B4):
+     * Scoring algorithm (exact > prefix > contains, best candidate wins):
      * - Exact match (case-insensitive): return immediately (highest confidence)
      * - Prefix match (query starts title): score = 800 - |query_len - title_len|
      * - Contains match (query inside title): score = 600 - |query_len - title_len|
@@ -1065,8 +1067,8 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * MAL search returns results ranked by popularity, which may not correspond
      * to the user's intent when querying by a subtitle, short name, or
      * alternative title. This method evaluates every candidate across all of its
-     * available titles (main, English, Japanese, synonyms) using the anidb B4
-     * scoring algorithm:
+     * available titles (main, English, Japanese, synonyms) using the
+     * exact/prefix/contains scoring algorithm:
      *
      * - Exact match (case-insensitive): return immediately (highest confidence)
      * - Prefix match (query starts title): score = 800 - |query_len - title_len|

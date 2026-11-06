@@ -56,6 +56,29 @@ use Workerman\Timer;
  * - Maps MAL responses to the legacy lookup() return contract (the live host
  *   path is the adapter triad; see {@see mapToMetadataReturn()})
  *
+ * ## Registration model (era-bridging — PG-175)
+ *
+ * This provider reaches the host through TWO seams and both stay live on
+ * purpose during the registration era:
+ *
+ * 1. The duck-typed legacy path — {@see registerWithMetadataManager()} sniffs
+ *    the host container's `Phlix\Media\Metadata\MetadataManager` for a
+ *    `registerProvider` method and pushes the adapter through it. That feed
+ *    is consumed only while the server-side MetadataManager::refreshItemMetadata()
+ *    still reads its internal providers/providers-by-type map.
+ * 2. The interface path — the server's PluginLoader independently auto-registers
+ *    this instance with the SourceRegistry whenever it satisfies
+ *    {@see MetadataSourceInterface} (the class implements it above), no plugin
+ *    cooperation required.
+ *
+ * The legacy map has no removal API server-side (MetadataManager exposes
+ * registerProvider only — no removeProvider/deregister/unregister), which is
+ * exactly why a runtime disable cannot un-register anything and
+ * {@see onDisable()} carries the inert latch instead (PG-171). Retiring seam
+ * 1 is tracked against the server-side migration off that map: when
+ * refreshItemMetadata stops reading it, delete the
+ * {@see registerWithMetadataManager()} leg and nothing else changes.
+ *
  * ## Configuration (plugin.json settings)
  *
  * - client_id: MyAnimeList API Client ID (required, secret)
@@ -137,6 +160,24 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * capping per-worker memory growth.
      */
     private const CACHE_MAX_ENTRIES = 512;
+
+    /**
+     * Upper bound (bytes) for a response body this provider will decode.
+     *
+     * 8 MiB is orders of magnitude beyond any legitimate MAL detail/search
+     * payload (tens of KiB), so real traffic never brushes it — but it bounds
+     * what a hostile or broken endpoint can buy with ONE cacheable 2xx:
+     * without a cap, an oversized body is json_decode()'d and then parked in
+     * the response cache (up to {@see CACHE_MAX_ENTRIES} entries), turning a
+     * single response into sustained decode and memory amplification.
+     *
+     * Honest scope (PG-173): the vendored client buffers the FULL peer body in
+     * memory before the success callback runs, so this cap does not prevent
+     * network-level buffering — it prevents the DECODE COST and the CACHE
+     * RESIDENCY from multiplying the exposure. An over-cap response takes the
+     * same path as invalid JSON: null, never cached.
+     */
+    private const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
     /**
      * Fields requested from the MAL anime-details endpoint.
@@ -358,6 +399,12 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * MetadataManager (e.g. a stripped CLI bootstrap) we log nothing and move
      * on — onEnable() must not abort the whole plugin just because the registry
      * is unavailable.
+     *
+     * This is legacy seam 1 of the two-seam registration model documented in
+     * the class header (PG-175): it stays only while the server's
+     * MetadataManager map is still consumed, and it can never be retracted at
+     * runtime (no server-side removal API — hence the onDisable() inert
+     * latch, PG-171). The SourceRegistry leg needs nothing from here.
      *
      * @param ContainerInterface $container Host PSR-11 container.
      *
@@ -700,6 +747,13 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      *
      * @return array<string, mixed>|null Decoded JSON object or null on
      *     transport/HTTP/JSON failure.
+     *
+     * Protected by design (PG-177): this is the class's ONLY protected method
+     * and it is a load-bearing test-override seam — every hermetic network
+     * double (the provider suite's anonymous subclasses, the transport file's
+     * TransportDriver) replaces exactly this leg, which is also why the class
+     * is deliberately not final. New code must not widen the protected
+     * surface without treating the override set as its API contract.
      */
     protected function httpGetJson(string $url): ?array
     {
@@ -841,7 +895,10 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * response. It reads the status code directly from the Response object and
      * extracts the body string for JSON decoding, preserving the 429/503
      * back-off, non-2xx → null, and cache-on-2xx-only JSON-object validation
-     * policy.
+     * policy. Objecthood is enforced strictly (PG-174): a decoded top-level
+     * list — including '{}' (the empty array) — is the failure path, never a
+     * cacheable value. The body is size-bounded against
+     * {@see self::MAX_RESPONSE_BYTES} before decode or cache (PG-173).
      *
      * @param string    $cacheKey  In-memory cache key (md5 of URL).
      * @param Response  $response  Workerman HTTP Response object.
@@ -877,14 +934,60 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             return null;
         }
 
-        $body = $response->getBody()->getContents();
+        // PG-173: bound the body before it is decoded or cached. A declared
+        // Content-Length over the cap is rejection on its own terms — the
+        // header itself is hostile or broken — whatever the body turns out to
+        // be. Never log body content, only sizes (repo logging posture).
+        $declaredLength = $response->getHeaderLine('Content-Length');
+        if ($declaredLength !== '' && ctype_digit($declaredLength)
+            && (int) $declaredLength > self::MAX_RESPONSE_BYTES) {
+            $this->logger?->warning(
+                'MAL API declared a ' . $declaredLength . '-byte body, over the '
+                . self::MAX_RESPONSE_BYTES . '-byte response cap; response rejected, not cached.'
+            );
 
-        /** @var mixed $decoded */
-        $decoded = json_decode($body, true);
-        if (!is_array($decoded)) {
             return null;
         }
 
+        $stream = $response->getBody();
+        $streamSize = $stream->getSize();
+        if ($streamSize !== null && $streamSize > self::MAX_RESPONSE_BYTES) {
+            $this->logger?->warning(
+                'MAL API returned a ' . $streamSize . '-byte body, over the '
+                . self::MAX_RESPONSE_BYTES . '-byte response cap; response rejected, not cached.'
+            );
+
+            return null;
+        }
+
+        $body = $stream->getContents();
+        if (strlen($body) > self::MAX_RESPONSE_BYTES) {
+            $this->logger?->warning(
+                'MAL API body exceeded the ' . self::MAX_RESPONSE_BYTES
+                . '-byte response cap; response rejected, not cached.'
+            );
+
+            return null;
+        }
+
+        /** @var mixed $decoded */
+        $decoded = json_decode($body, true);
+
+        // PG-174: only a JSON OBJECT is a valid MAL response. json_decode(…,
+        // true) hands a top-level list back as an array too, and the old
+        // is_array-only gate accepted it — the array<string,mixed> stamp then
+        // laundered the lie into the cache and every downstream key read.
+        // Disclosed tightening: '{}' decodes to the empty array, which is
+        // list-shaped, so an empty body now takes the failure path (null,
+        // uncached). The real zero-results shape is {"data":[]} — a keyed
+        // object — and is unaffected.
+        if (!is_array($decoded) || array_is_list($decoded)) {
+            return null;
+        }
+
+        // Boundary type (now earned, not laundered): with the list gate above
+        // passed, the document was a JSON object, and JSON object keys are
+        // strings by definition.
         /** @var array<string, mixed> $decoded */
         $this->cache[$cacheKey] = [$decoded, ($this->clock)()];
 
@@ -1196,6 +1299,10 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     /**
      * Score a single candidate's titles against the query.
      *
+     * Matching is symmetric (PG-172): the query sitting inside/starting the
+     * title and the title sitting inside/starting the query score on the
+     * same 800-prefix / 600-contains bands, length-difference-penalized.
+     *
      * @param array<int, string> $titles      All titles for this candidate.
      * @param string             $queryLower  Lowercased query string.
      * @param int                $queryLen    Length of the lowercased query.
@@ -1229,6 +1336,30 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
                 $score = 600 - abs($queryLen - $titleLen);
                 if ($score > $bestScore) {
                     $bestScore = $score;
+                }
+            }
+
+            // PG-172: symmetric bands. A registered title that is itself the
+            // query's prefix or substring used to score zero, so the
+            // sequel-shaped lookup ("One Piece TV" against candidate
+            // "One Piece") silently lost the match. Mirroring the forward
+            // bands at the same strengths fixes that. An EMPTY title is
+            // never a reverse prefix of any query — without the guard, one
+            // blank alternative-title entry would make its candidate score
+            // 800 - |queryLen| against EVERY query.
+            if ($titleLower !== '') {
+                if (str_starts_with($queryLower, $titleLower)) {
+                    $score = 800 - abs($queryLen - $titleLen);
+                    if ($score > $bestScore) {
+                        $bestScore = $score;
+                    }
+                }
+
+                if (str_contains($queryLower, $titleLower)) {
+                    $score = 600 - abs($queryLen - $titleLen);
+                    if ($score > $bestScore) {
+                        $bestScore = $score;
+                    }
                 }
             }
         }
@@ -1446,10 +1577,17 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         $clean = (string) preg_replace('/\([^\)]+\)/', '', $clean);
 
         // Strip episode patterns: S01E02, 01x02, Episode 01, Episode.01
-        // (standalone episode strip happens AFTER resolution/codec/source strip below)
+        // (standalone episode strip happens AFTER resolution/codec/source strip below).
+        // PG-172: the previous per-letter-optional construction
+        // ([Ee]p?[i]?[t]?[.]?) could never cross the 'sode' remainder or a
+        // space separator, so the very "Episode 01" form this comment
+        // promises survived polluted ("Show Episode 01" → "Show Episode"
+        // after the later trailing-number shave). Word-form alternatives
+        // under a separator class — with 'e'/'ep' still covering the short
+        // 'E13'/'EP04' corpus shapes — make the claimed behavior real.
         $clean = (string) preg_replace('/[Ss]\d{1,2}[Ee]\d{1,4}/', '', $clean);
         $clean = (string) preg_replace('/\d{1,2}[Xx]\d{1,4}/', '', $clean);
-        $clean = (string) preg_replace('/(?:^|[.\-_ ])[Ee]p?[i]?[t]?[.]?\d{1,4}\b/i', '', $clean);
+        $clean = (string) preg_replace('/(?:^|[.\-_ ])(?:episode|ep|e)[ ._-]*\d{1,4}\b/i', '', $clean);
 
         // Strip common suffixes: 720p, 1080p, BluRay, HDTV, etc.
         // MUST run before standalone-episode strip so episode numbers become genuinely trailing
@@ -1614,6 +1752,11 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * Convert a MAL average episode duration (seconds) to runtime ticks.
      *
      * Uses the host tick convention (1 second = 10,000,000 100ns ticks).
+     * Durations at or beyond the largest safely-multipliable int are reported
+     * as unknown (PG-176): parseAnimeResponse() saturates an out-of-range
+     * numeric string to PHP_INT_MAX through its is_numeric cast, and under
+     * strict_types an overflowing product would leave this `: ?int` as a
+     * TypeError thrown inside the metadata refresh, not a null runtime.
      *
      * @param mixed $seconds Average episode duration in seconds.
      *
@@ -1626,6 +1769,10 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         }
 
         if ($seconds <= 0) {
+            return null;
+        }
+
+        if ($seconds > intdiv(PHP_INT_MAX, self::TICKS_PER_SECOND)) {
             return null;
         }
 

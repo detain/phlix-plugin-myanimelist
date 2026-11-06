@@ -26,6 +26,15 @@ use Workerman\Http\Response;
  * invisible. Here we drive the REAL `httpGetJson()` / `requestAndWait()` with a
  * fake async client and assert the decoded JSON body actually reaches the
  * caller and populates `getDetails()`.
+ *
+ * PG-177: `httpGetJson()` is the provider's deliberate protected
+ * test-override seam — the only protected method on the class — so this
+ * suite reaches it through the visible {@see TransportDriver} wrapper
+ * instead of reflection-by-string. Genuinely-private collaborators
+ * (`requestAndWait`, `getHttpClient`, `findIdByTitleInternal`) keep
+ * reflection, and parent-private property injection reflects
+ * {@see MyanimelistMetadataProvider} itself, because PHP does not expose a
+ * private parent property through a child's reflection.
  */
 final class MyanimelistTransportTest extends TestCase
 {
@@ -36,10 +45,15 @@ final class MyanimelistTransportTest extends TestCase
      * the test is deterministic and instant.
      *
      * @param array<string, Response> $responses URL-substring => Response.
+     *
+     * The instance is the file-local {@see TransportDriver} subclass, so
+     * tests reach the protected httpGetJson seam through a visible method
+     * rather than reflection-by-string (PG-177). Private-parent property
+     * injection below therefore reflects MyanimelistMetadataProvider itself.
      */
-    private function makeProvider(array $responses): MyanimelistMetadataProvider
+    private function makeProvider(array $responses): TransportDriver
     {
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new TransportDriver(['client_id' => 'test-id']);
 
         $fakeClient = new class ($responses) extends Client {
             /** @var array<string, Response> */
@@ -68,7 +82,7 @@ final class MyanimelistTransportTest extends TestCase
             }
         };
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
 
         $httpClient = $ref->getProperty('httpClient');
         $httpClient->setAccessible(true);
@@ -116,7 +130,7 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(200, [], $body),
         ]);
 
-        $result = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $result = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
 
         $this->assertIsArray($result);
         $this->assertSame(1, $result['id']);
@@ -134,8 +148,8 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(200, [], '{"id":42,"title":"Trigun"}'),
         ]);
 
-        $first = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/42']);
-        $second = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/42']);
+        $first = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/42');
+        $second = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/42');
 
         $this->assertIsArray($first);
         $this->assertSame(42, $first['id']);
@@ -152,7 +166,7 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(404, [], '{"error":"not_found"}'),
         ]);
 
-        $result = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/999999']);
+        $result = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/999999');
 
         $this->assertNull($result);
     }
@@ -166,7 +180,7 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(200, [], 'not json at all'),
         ]);
 
-        $result = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $result = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
 
         $this->assertNull($result);
     }
@@ -256,10 +270,10 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(429, ['Retry-After' => '2'], '{}'),
         ]);
 
-        $result = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $result = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
         $this->assertNull($result);
 
-        $ref = new \ReflectionProperty($provider, 'retryAfterUntil');
+        $ref = new \ReflectionProperty(MyanimelistMetadataProvider::class, 'retryAfterUntil');
         $ref->setAccessible(true);
         $this->assertGreaterThan(0.0, $ref->getValue($provider), 'Retry-After back-off was not recorded');
     }
@@ -281,9 +295,9 @@ final class MyanimelistTransportTest extends TestCase
             }
         };
 
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new TransportDriver(['client_id' => 'test-id']);
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
         $httpClient = $ref->getProperty('httpClient');
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
@@ -317,9 +331,9 @@ final class MyanimelistTransportTest extends TestCase
             }
         };
 
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new TransportDriver(['client_id' => 'test-id']);
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
         $httpClient = $ref->getProperty('httpClient');
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
@@ -357,9 +371,9 @@ final class MyanimelistTransportTest extends TestCase
             }
         };
 
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new TransportDriver(['client_id' => 'test-id']);
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
         $httpClient = $ref->getProperty('httpClient');
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
@@ -411,9 +425,9 @@ final class MyanimelistTransportTest extends TestCase
     public function test_request_and_wait_never_carries_phantom_verify_ssl_option(): void
     {
         foreach ([[], ['use_ssl_verification' => false], ['use_ssl_verification' => true]] as $extra) {
-            $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id'] + $extra);
+            $provider = new TransportDriver(['client_id' => 'test-id'] + $extra);
 
-            $ref = new \ReflectionClass($provider);
+            $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
             $httpClient = $ref->getProperty('httpClient');
             $httpClient->setAccessible(true);
 
@@ -469,7 +483,7 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(503, [], '{"error":"service_unavailable"}'),
         ]);
 
-        $result = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $result = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
 
         $this->assertNull($result);
     }
@@ -480,7 +494,7 @@ final class MyanimelistTransportTest extends TestCase
      */
     public function test_http_get_json_does_not_cache_error_response(): void
     {
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new TransportDriver(['client_id' => 'test-id']);
 
         $callCount = 0;
         $fakeClient = new class ($callCount) extends Client {
@@ -516,7 +530,7 @@ final class MyanimelistTransportTest extends TestCase
             }
         };
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
         $httpClient = $ref->getProperty('httpClient');
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
@@ -532,11 +546,11 @@ final class MyanimelistTransportTest extends TestCase
         });
 
         // First call returns 503 -> null
-        $result1 = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $result1 = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
         $this->assertNull($result1);
 
         // Second call with same URL should make a fresh request (not cached error)
-        $result2 = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $result2 = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
         $this->assertNotNull($result2);
         $this->assertSame(1, $result2['id']);
     }
@@ -558,7 +572,7 @@ final class MyanimelistTransportTest extends TestCase
      */
     public function test_request_and_wait_sends_client_id_header_under_its_real_name(): void
     {
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new TransportDriver(['client_id' => 'test-id']);
 
         $fakeClient = new class extends Client {
             private array $capturedOptions = [];
@@ -578,7 +592,7 @@ final class MyanimelistTransportTest extends TestCase
             }
         };
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
         $httpClient = $ref->getProperty('httpClient');
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
@@ -638,7 +652,7 @@ final class MyanimelistTransportTest extends TestCase
      */
     private function dialedSslContext(array $settings, ?\Psr\Log\LoggerInterface $logger = null): array
     {
-        $provider = new MyanimelistMetadataProvider($settings);
+        $provider = new TransportDriver($settings);
         if ($logger !== null) {
             $provider->setLogger($logger);
         }
@@ -794,7 +808,7 @@ final class MyanimelistTransportTest extends TestCase
      */
     public function test_request_and_wait_refuses_redirects_so_the_client_id_never_leaves_the_api_host(): void
     {
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new TransportDriver(['client_id' => 'test-id']);
 
         $fakeClient = new class extends Client {
             private array $capturedOptions = [];
@@ -814,7 +828,7 @@ final class MyanimelistTransportTest extends TestCase
             }
         };
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
         $httpClient = $ref->getProperty('httpClient');
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
@@ -894,7 +908,7 @@ final class MyanimelistTransportTest extends TestCase
         ]);
 
         $this->assertNull(
-            $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1'])
+            $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1')
         );
     }
 
@@ -906,7 +920,7 @@ final class MyanimelistTransportTest extends TestCase
      */
     public function test_cache_entry_is_fresh_within_the_ttl_and_refetched_after(): void
     {
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new TransportDriver(['client_id' => 'test-id']);
 
         $now = 1_760_000_000.0;
 
@@ -928,7 +942,7 @@ final class MyanimelistTransportTest extends TestCase
             }
         };
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
 
         $httpClient = $ref->getProperty('httpClient');
         $httpClient->setAccessible(true);
@@ -952,24 +966,24 @@ final class MyanimelistTransportTest extends TestCase
 
         $url = 'https://api.myanimelist.net/v2/anime/1';
 
-        $first = $this->invoke($provider, 'httpGetJson', [$url]);
+        $first = $provider->driveHttpGetJson($url);
         $this->assertSame('Generation 1', $first['title']);
         $this->assertSame(1, $fakeClient->requests);
 
         // +3540s: still inside the 3600s window — served from cache, zero requests.
         $now += 3540.0;
-        $cached = $this->invoke($provider, 'httpGetJson', [$url]);
+        $cached = $provider->driveHttpGetJson($url);
         $this->assertSame('Generation 1', $cached['title']);
         $this->assertSame(1, $fakeClient->requests);
 
         // +60s more: past the window — refetched, and the fresh body replaces the entry.
         $now += 60.0;
-        $refetched = $this->invoke($provider, 'httpGetJson', [$url]);
+        $refetched = $provider->driveHttpGetJson($url);
         $this->assertSame('Generation 2', $refetched['title']);
         $this->assertSame(2, $fakeClient->requests);
 
         // And the replacement is cached again: a third call at the same time is free.
-        $again = $this->invoke($provider, 'httpGetJson', [$url]);
+        $again = $provider->driveHttpGetJson($url);
         $this->assertSame('Generation 2', $again['title']);
         $this->assertSame(2, $fakeClient->requests);
     }
@@ -984,7 +998,7 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(200, [], '{"id":7,"title":"Fresh"}'),
         ]);
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
         $cacheProp = $ref->getProperty('cache');
         $cacheProp->setAccessible(true);
 
@@ -995,7 +1009,7 @@ final class MyanimelistTransportTest extends TestCase
         }
         $cacheProp->setValue($provider, $seed);
 
-        $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/7']);
+        $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/7');
 
         /** @var array<string, array{0: array<string, mixed>, 1: float}> $cache */
         $cache = $cacheProp->getValue($provider);
@@ -1013,7 +1027,7 @@ final class MyanimelistTransportTest extends TestCase
      */
     public function test_search_request_omits_nsfw_parameters(): void
     {
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new TransportDriver(['client_id' => 'test-id']);
 
         $fakeClient = new class () extends Client {
             public ?string $lastUrl = null;
@@ -1031,7 +1045,7 @@ final class MyanimelistTransportTest extends TestCase
             }
         };
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
 
         $httpClient = $ref->getProperty('httpClient');
         $httpClient->setAccessible(true);
@@ -1092,7 +1106,7 @@ final class MyanimelistTransportTest extends TestCase
             ]);
             $provider->setLogger($logger);
 
-            $result = $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+            $result = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
 
             if ($level === null) {
                 $this->assertIsArray($result, 'the 2xx control must succeed');
@@ -1134,7 +1148,7 @@ final class MyanimelistTransportTest extends TestCase
             }
         );
 
-        $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
+        $provider = new TransportDriver(['client_id' => 'test-id']);
 
         // Two failure vectors reach requestAndWait(): an exception thrown
         // synchronously out of Client::request(), and the async `error`
@@ -1158,7 +1172,7 @@ final class MyanimelistTransportTest extends TestCase
             }
         };
 
-        $ref = new \ReflectionClass($provider);
+        $ref = new \ReflectionClass(MyanimelistMetadataProvider::class);
 
         $httpClient = $ref->getProperty('httpClient');
         $httpClient->setAccessible(true);
@@ -1228,7 +1242,7 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(429, ['Retry-After' => $when], '{}'),
         ]);
 
-        $this->assertNull($this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']));
+        $this->assertNull($provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1'));
 
         $until = $this->retryAfterUntil($provider);
         $now = microtime(true);
@@ -1245,7 +1259,7 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(429, ['Retry-After' => $when], '{}'),
         ]);
 
-        $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
 
         $until = $this->retryAfterUntil($provider);
         $now = microtime(true);
@@ -1262,7 +1276,7 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(429, ['Retry-After' => $when], '{}'),
         ]);
 
-        $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
 
         $until = $this->retryAfterUntil($provider);
         $now = microtime(true);
@@ -1277,7 +1291,7 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(429, ['Retry-After' => 'notadate'], '{}'),
         ]);
 
-        $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
 
         $until = $this->retryAfterUntil($provider);
         $now = microtime(true);
@@ -1310,7 +1324,7 @@ final class MyanimelistTransportTest extends TestCase
             'api.myanimelist.net' => new Response(429, ['Retry-After' => $corrupt], '{}'),
         ]);
 
-        $this->invoke($provider, 'httpGetJson', ['https://api.myanimelist.net/v2/anime/1']);
+        $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
 
         $until = $this->retryAfterUntil($provider);
         $now = microtime(true);
@@ -1323,14 +1337,178 @@ final class MyanimelistTransportTest extends TestCase
         );
     }
 
+    // -------------------------------------------------------------------------
+    // PG-173: response body size cap (bounds decode + cache amplification)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Read the declared cap from the class constant — the pin follows the
+     * constant instead of restating a magic number.
+     */
+    private function maxResponseBytes(): int
+    {
+        $cap = (new \ReflectionClass(MyanimelistMetadataProvider::class))
+            ->getConstant('MAX_RESPONSE_BYTES');
+        $this->assertIsInt($cap, 'the provider must declare an int MAX_RESPONSE_BYTES cap');
+
+        return $cap;
+    }
+
+    /**
+     * The live response cache, read through the parent class (private parent
+     * properties are not visible through the driver child's reflection).
+     *
+     * @return array<string, mixed>
+     */
+    private function cacheOf(MyanimelistMetadataProvider $provider): array
+    {
+        $prop = new \ReflectionProperty(MyanimelistMetadataProvider::class, 'cache');
+        $prop->setAccessible(true);
+
+        /** @var array<string, mixed> $cache */
+        $cache = $prop->getValue($provider);
+
+        return $cache;
+    }
+
+    /**
+     * PG-173a: a 2xx whose DECLARED Content-Length exceeds the cap is rejected
+     * up front — decoded body bytes never enter json_decode() or the cache.
+     */
+    public function test_oversized_declared_content_length_is_rejected(): void
+    {
+        $cap = $this->maxResponseBytes();
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(200, ['Content-Length' => (string) ($cap + 1)], '{"id":1}'),
+        ]);
+
+        $this->assertNull($provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1'));
+        $this->assertSame([], $this->cacheOf($provider), 'a rejected body must never enter the cache');
+    }
+
+    /**
+     * PG-173b: with no Content-Length header to lean on, the ACTUAL body
+     * size decides — over the cap is rejected and stays uncached.
+     */
+    public function test_oversized_actual_body_is_rejected(): void
+    {
+        $cap = $this->maxResponseBytes();
+        $prefix = '{"id":1,"pad":"';
+        $pad = $cap - strlen($prefix) - 2;
+        $oversize = $prefix . str_repeat('x', $pad + 1) . '"}';
+        $this->assertSame($cap + 1, strlen($oversize), 'fixture must be exactly one byte over the cap');
+
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(200, [], $oversize),
+        ]);
+
+        $this->assertNull($provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1'));
+        $this->assertSame([], $this->cacheOf($provider));
+    }
+
+    /**
+     * PG-173c: the cap is inclusive at the boundary — a valid JSON object of
+     * exactly MAX_RESPONSE_BYTES bytes is decoded and cached normally.
+     */
+    public function test_body_exactly_at_the_cap_is_accepted(): void
+    {
+        $cap = $this->maxResponseBytes();
+        $prefix = '{"id":1,"pad":"';
+        $exact = $prefix . str_repeat('x', $cap - strlen($prefix) - 2) . '"}';
+        $this->assertSame($cap, strlen($exact), 'fixture must be exactly at the cap');
+
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(200, [], $exact),
+        ]);
+
+        $result = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
+
+        $this->assertIsArray($result);
+        $this->assertSame(1, $result['id']);
+    }
+
+    // -------------------------------------------------------------------------
+    // PG-174: only JSON objects are cacheable responses
+    // -------------------------------------------------------------------------
+
+    /**
+     * PG-174a: a top-level JSON LIST decodes to an array and used to pass the
+     * is_array gate, get stamped array<string,mixed>, and be cached. It is
+     * now the failure path: null, uncached.
+     */
+    public function test_top_level_json_list_is_rejected(): void
+    {
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(200, [], '[{"id":1},{"id":2}]'),
+        ]);
+
+        $this->assertNull($provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1'));
+        $this->assertSame([], $this->cacheOf($provider), 'a list body must never be cached or stamped as an object');
+    }
+
+    /**
+     * PG-174b (disclosed behavior change): '{}' decodes to the empty array,
+     * which is list-shaped — an empty body now takes the failure path
+     * (null, uncached) instead of caching an empty object. Real MAL bodies
+     * are never '{}' (see the {"data":[]} control below).
+     */
+    public function test_empty_object_takes_the_failure_path(): void
+    {
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(200, [], '{}'),
+        ]);
+
+        $this->assertNull($provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1'));
+        $this->assertSame([], $this->cacheOf($provider));
+    }
+
+    /**
+     * PG-174 control: the real zero-results MAL shape — an OBJECT holding an
+     * empty list — must stay cacheable: json_decode gives a non-list array,
+     * untouched by the list rejection.
+     */
+    public function test_search_no_results_object_is_still_cacheable(): void
+    {
+        $provider = $this->makeProvider([
+            'api.myanimelist.net' => new Response(200, [], '{"data":[]}'),
+        ]);
+
+        $result = $provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1');
+
+        $this->assertIsArray($result);
+        $this->assertSame([], $result['data']);
+        $this->assertArrayHasKey(md5('https://api.myanimelist.net/v2/anime/1'), $this->cacheOf($provider));
+    }
+
     private function retryAfterUntil(MyanimelistMetadataProvider $provider): float
     {
-        $prop = new \ReflectionProperty($provider, 'retryAfterUntil');
+        $prop = new \ReflectionProperty(MyanimelistMetadataProvider::class, 'retryAfterUntil');
         $prop->setAccessible(true);
 
         /** @var float $value */
         $value = $prop->getValue($provider);
 
         return $value;
+    }
+}
+
+/**
+ * File-local test driver (PG-177).
+ *
+ * Exposes ONE visible wrapper around the provider's protected
+ * httpGetJson seam so this suite drives the real transport without
+ * reflection-by-string. The class adds no behavior — production test
+ * doubles in the provider suite override the same seam the same way, which
+ * is the load-bearing reason the method is protected and the provider class
+ * is not final.
+ */
+final class TransportDriver extends MyanimelistMetadataProvider
+{
+    /**
+     * @return array<string, mixed>|null
+     */
+    public function driveHttpGetJson(string $url): ?array
+    {
+        return $this->httpGetJson($url);
     }
 }

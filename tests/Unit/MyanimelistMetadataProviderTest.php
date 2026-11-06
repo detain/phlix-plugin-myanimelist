@@ -491,6 +491,19 @@ final class MyanimelistMetadataProviderTest extends TestCase
                 'Fate.Zero.E13.1920x1080.mkv',
                 'Fate Zero',
             ],
+            // PG-172: the word form "Episode NN" with a SPACE before the
+            // number (the very shape the strip comment promises) survived the
+            // old one-letter-class regex — the 'sode' remainder blocked it —
+            // and the later standalone strip only shaved the number, leaving
+            // the polluted "Some Show Episode" query.
+            'word-form episode with space separator' => [
+                'Some Show Episode 01.mkv',
+                'Some Show',
+            ],
+            'leading word-form episode' => [
+                'Episode 12 Cowboy Bebop.mkv',
+                'Cowboy Bebop',
+            ],
         ];
     }
 
@@ -1106,7 +1119,41 @@ final class MyanimelistMetadataProviderTest extends TestCase
             'zero'       => [0, null],
             'negative'   => [-5, null],
             'null'       => [null, null],
+            // PG-176: PHP_INT_MAX * TICKS_PER_SECOND overflows to float, and
+            // the strict `: ?int` return type then raises TypeError on the
+            // unclamped path — the clamp must yield null instead. The
+            // boundary row pins that the largest SAFE seconds value still
+            // converts exactly (the clamp is > intdiv, not >=).
+            'overflow' => [PHP_INT_MAX, null],
+            'max safe boundary' => [
+                intdiv(PHP_INT_MAX, 10_000_000),
+                intdiv(PHP_INT_MAX, 10_000_000) * 10_000_000,
+            ],
         ];
+    }
+
+    /**
+     * PG-176 end-to-end: a details payload whose average_episode_duration is a
+     * numeric string beyond the int range saturates to PHP_INT_MAX through
+     * parseAnimeResponse()'s is_numeric cast (measured PHP 8.3 x86-64
+     * behavior), and the full parse → mapToMetadataReturn chain must then
+     * produce a null runtime_ticks — never the float overflow escaping the
+     * strict int return type as a TypeError.
+     */
+    public function test_saturating_episode_duration_maps_to_null_runtime(): void
+    {
+        $json = '{"id":3,"title":"Huge Runtime","average_episode_duration":"10000000000000000000"}';
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($json, true);
+
+        /** @var array<string, mixed> $parsed */
+        $parsed = $this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$decoded]);
+        $this->assertSame(PHP_INT_MAX, $parsed['episode_length']);
+
+        /** @var array<string, mixed> $result */
+        $result = $this->invokePrivate($this->makeProvider(), 'mapToMetadataReturn', [$parsed]);
+
+        $this->assertNull($result['runtime_ticks']);
     }
 
     public function test_enforce_rate_limit_waits_out_recorded_back_off(): void
@@ -1223,6 +1270,30 @@ final class MyanimelistMetadataProviderTest extends TestCase
             ],
             'empty titles returns 0' => [
                 [],
+                'one piece',
+                9,
+                0,
+            ],
+            // PG-172: scoring was one-directional — only title-starts-with /
+            // title-contains-query counted. A candidate that is itself a
+            // prefix of the query (the classic sequel case: searching
+            // "One Piece TV" against the registered title "One Piece") scored
+            // zero and lost the lookup. The mirrored bands fix that; an EMPTY
+            // title is never a reverse prefix of anything, so it stays 0.
+            'reverse prefix: query starts with title' => [
+                ['One Piece'],
+                'one piece tv',
+                12,
+                797, // 800 - |12 - 9|
+            ],
+            'reverse contains: title inside query' => [
+                ['Bebop'],
+                'cowboy bebop',
+                12,
+                593, // 600 - |12 - 5|
+            ],
+            'empty title never matches (forward or reverse)' => [
+                [''],
                 'one piece',
                 9,
                 0,

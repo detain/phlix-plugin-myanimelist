@@ -341,7 +341,10 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         // value (not the trim of it): the blank check above already covers
         // whitespace-only settings; anything else non-printable means the
         // config itself is malformed or hostile and no request may carry it.
-        if (preg_match('/^[\x21-\x7E]+$/', $clientId) !== 1) {
+        // The anchor is \z, not $: PCRE's $ also matches immediately before a
+        // final newline, so "abc\n" would sail through a $-anchored guard and
+        // reach the wire with a trailing LF inside the header value (PG-179).
+        if (preg_match('/^[\x21-\x7E]+\z/', $clientId) !== 1) {
             throw new \InvalidArgumentException(
                 'MyAnimeList "client_id" must contain only printable ASCII '
                 . 'characters (no spaces, CR/LF or other control bytes) — '
@@ -367,6 +370,43 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     public function setLogger(LoggerInterface $logger): void
     {
         $this->logger = $logger;
+    }
+
+    /**
+     * Visible test seam for the timing clock (PG-178) — NOT plugin API.
+     *
+     * The rate limiter and cache freshness read all time through
+     * {@see self::$clock}; tests drive it with a fake clock instead of
+     * sleeping wall time. These seams replace the former ReflectionProperty
+     * injection of the private closures, which broke silently at runtime on
+     * renames (phpstan analyses src/ only, and a renamed private property is
+     * invisible to any static check over the test source).
+     *
+     * @param \Closure(): float $clock
+     */
+    public function setClockForTest(\Closure $clock): void
+    {
+        $this->clock = $clock;
+    }
+
+    /**
+     * Visible test seam for the rate-limit sleep (PG-178) — NOT plugin API.
+     *
+     * @param \Closure(float): void $timerSleep
+     */
+    public function setTimerSleepForTest(\Closure $timerSleep): void
+    {
+        $this->timerSleep = $timerSleep;
+    }
+
+    /**
+     * Visible test seam for the cooperative-wait tick (PG-178) — NOT plugin API.
+     *
+     * @param \Closure(): void $waitTick
+     */
+    public function setWaitTickForTest(\Closure $waitTick): void
+    {
+        $this->waitTick = $waitTick;
     }
 
     /**

@@ -32,7 +32,9 @@ use Workerman\Http\Response;
  * suite reaches it through the visible {@see TransportDriver} wrapper
  * instead of reflection-by-string. Genuinely-private collaborators
  * (`requestAndWait`, `getHttpClient`, `findIdByTitleInternal`) keep
- * reflection, and parent-private property injection reflects
+ * reflection, the timing closures (`clock`, `timerSleep`, `waitTick`) are
+ * injected through the visible @internal seams added by PG-178, and only the
+ * parent-private `httpClient` property injection still reflects
  * {@see MyanimelistMetadataProvider} itself, because PHP does not expose a
  * private parent property through a child's reflection.
  */
@@ -48,8 +50,10 @@ final class MyanimelistTransportTest extends TestCase
      *
      * The instance is the file-local {@see TransportDriver} subclass, so
      * tests reach the protected httpGetJson seam through a visible method
-     * rather than reflection-by-string (PG-177). Private-parent property
-     * injection below therefore reflects MyanimelistMetadataProvider itself.
+     * rather than reflection-by-string (PG-177). The timing closures go
+     * through the @internal seams (PG-178); only the private-parent
+     * `httpClient` injection below still reflects MyanimelistMetadataProvider
+     * itself.
      */
     private function makeProvider(array $responses): TransportDriver
     {
@@ -91,14 +95,10 @@ final class MyanimelistTransportTest extends TestCase
         // No-op the rate-limit sleep and the cooperative-wait tick so the test
         // neither blocks nor depends on an event loop (the fake client resolves
         // the callback synchronously, so `done` is already true).
-        $noopFloat = $ref->getProperty('timerSleep');
-        $noopFloat->setAccessible(true);
-        $noopFloat->setValue($provider, static function (float $s): void {
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
-        $waitTick = $ref->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $provider->setWaitTickForTest(static function (): void {
         });
 
         return $provider;
@@ -302,14 +302,10 @@ final class MyanimelistTransportTest extends TestCase
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
 
-        $noopFloat = $ref->getProperty('timerSleep');
-        $noopFloat->setAccessible(true);
-        $noopFloat->setValue($provider, static function (float $s): void {
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
-        $waitTick = $ref->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $provider->setWaitTickForTest(static function (): void {
         });
 
         $result = $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
@@ -338,14 +334,10 @@ final class MyanimelistTransportTest extends TestCase
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
 
-        $noopFloat = $ref->getProperty('timerSleep');
-        $noopFloat->setAccessible(true);
-        $noopFloat->setValue($provider, static function (float $s): void {
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
-        $waitTick = $ref->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $provider->setWaitTickForTest(static function (): void {
         });
 
         $result = $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
@@ -378,9 +370,9 @@ final class MyanimelistTransportTest extends TestCase
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
 
-        $noopFloat = $ref->getProperty('timerSleep');
-        $noopFloat->setAccessible(true);
-        $noopFloat->setValue($provider, static function (float $s): void {
+        // Timing closures go through the visible test seams (PG-178);
+        // httpClient stays reflection-injected — it is not a timing closure.
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
         // Stepping wall clock: every tick advances injected "reality" by 2s,
@@ -389,15 +381,11 @@ final class MyanimelistTransportTest extends TestCase
         $now = 0.0;
         $ticks = 0;
 
-        $clock = $ref->getProperty('clock');
-        $clock->setAccessible(true);
-        $clock->setValue($provider, static function () use (&$now): float {
+        $provider->setClockForTest(static function () use (&$now): float {
             return $now;
         });
 
-        $waitTick = $ref->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function () use (&$now, &$ticks): void {
+        $provider->setWaitTickForTest(static function () use (&$now, &$ticks): void {
             $ticks++;
             $now += 2.0;
         });
@@ -452,14 +440,10 @@ final class MyanimelistTransportTest extends TestCase
 
             $httpClient->setValue($provider, $fakeClient);
 
-            $noopFloat = $ref->getProperty('timerSleep');
-            $noopFloat->setAccessible(true);
-            $noopFloat->setValue($provider, static function (float $s): void {
+            $provider->setTimerSleepForTest(static function (float $s): void {
             });
 
-            $waitTick = $ref->getProperty('waitTick');
-            $waitTick->setAccessible(true);
-            $waitTick->setValue($provider, static function (): void {
+            $provider->setWaitTickForTest(static function (): void {
             });
 
             $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
@@ -535,14 +519,10 @@ final class MyanimelistTransportTest extends TestCase
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
 
-        $noopFloat = $ref->getProperty('timerSleep');
-        $noopFloat->setAccessible(true);
-        $noopFloat->setValue($provider, static function (float $s): void {
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
-        $waitTick = $ref->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $provider->setWaitTickForTest(static function (): void {
         });
 
         // First call returns 503 -> null
@@ -597,14 +577,10 @@ final class MyanimelistTransportTest extends TestCase
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
 
-        $noopFloat = $ref->getProperty('timerSleep');
-        $noopFloat->setAccessible(true);
-        $noopFloat->setValue($provider, static function (float $s): void {
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
-        $waitTick = $ref->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $provider->setWaitTickForTest(static function (): void {
         });
 
         $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
@@ -833,14 +809,10 @@ final class MyanimelistTransportTest extends TestCase
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
 
-        $noopFloat = $ref->getProperty('timerSleep');
-        $noopFloat->setAccessible(true);
-        $noopFloat->setValue($provider, static function (float $s): void {
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
-        $waitTick = $ref->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $provider->setWaitTickForTest(static function (): void {
         });
 
         $this->invoke($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);
@@ -948,20 +920,14 @@ final class MyanimelistTransportTest extends TestCase
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
 
-        $clock = $ref->getProperty('clock');
-        $clock->setAccessible(true);
-        $clock->setValue($provider, static function () use (&$now): float {
+        $provider->setClockForTest(static function () use (&$now): float {
             return $now;
         });
 
-        $timerSleep = $ref->getProperty('timerSleep');
-        $timerSleep->setAccessible(true);
-        $timerSleep->setValue($provider, static function (float $s): void {
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
-        $waitTick = $ref->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $provider->setWaitTickForTest(static function (): void {
         });
 
         $url = 'https://api.myanimelist.net/v2/anime/1';
@@ -1051,14 +1017,10 @@ final class MyanimelistTransportTest extends TestCase
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
 
-        $timerSleep = $ref->getProperty('timerSleep');
-        $timerSleep->setAccessible(true);
-        $timerSleep->setValue($provider, static function (float $s): void {
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
-        $waitTick = $ref->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $provider->setWaitTickForTest(static function (): void {
         });
 
         $this->assertNull($this->invoke($provider, 'findIdByTitleInternal', ['Some Title']));

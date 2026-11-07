@@ -115,15 +115,13 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
         $httpClient->setAccessible(true);
         $httpClient->setValue($provider, $fakeClient);
 
-        // Noop the rate-limit sleep and cooperative-wait tick
-        $timerSleep = new \ReflectionProperty(MyanimelistMetadataProvider::class, 'timerSleep');
-        $timerSleep->setAccessible(true);
-        $timerSleep->setValue($provider, static function (float $s): void {
+        // Noop the rate-limit sleep and cooperative-wait tick via the visible
+        // test seams (PG-178). httpClient stays reflection-injected: it is not
+        // a timing closure and is outside this seam's scope.
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
-        $waitTick = new \ReflectionProperty(MyanimelistMetadataProvider::class, 'waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $provider->setWaitTickForTest(static function (): void {
         });
 
         return $provider;

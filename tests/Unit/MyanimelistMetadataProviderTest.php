@@ -22,8 +22,9 @@ use Psr\Container\ContainerInterface;
  *
  * These tests cover the filename-parsing logic, JSON response parsing,
  * field mapping, and helper mappers without requiring network access.
- * Private methods are exercised via Reflection; nothing here issues a
- * real HTTP request.
+ * Private methods are exercised via Reflection, timing closures are driven
+ * through the visible @internal seams (PG-178); nothing here issues a real
+ * HTTP request.
  */
 final class MyanimelistMetadataProviderTest extends TestCase
 {
@@ -34,17 +35,11 @@ final class MyanimelistMetadataProviderTest extends TestCase
     {
         $provider = new MyanimelistMetadataProvider(['client_id' => 'test-id']);
 
-        // Inject a fake timerSleep that uses usleep (blocking) instead of
-        // Workerman\Timer::sleep() so the test can run without the workerman library.
-        $reflection = new \ReflectionClass($provider);
-        $prop = $reflection->getProperty('timerSleep');
-        $prop->setAccessible(true);
-        $prop->setValue(
-            $provider,
-            static function (float $seconds): void {
-                usleep((int) ($seconds * 1_000_000));
-            }
-        );
+        // Replace Workerman\Timer::sleep() with a blocking usleep so tests
+        // run without the event loop — via the visible seam (PG-178).
+        $provider->setTimerSleepForTest(static function (float $seconds): void {
+            usleep((int) ($seconds * 1_000_000));
+        });
 
         return $provider;
     }
@@ -106,6 +101,9 @@ final class MyanimelistMetadataProviderTest extends TestCase
         return [
             'CRLF injection'   => [['client_id' => "abc\r\nX-Injected: yes"]],
             'bare newline'     => [['client_id' => "abc\ndef"]],
+            // PCRE `$` also matches before a final newline — the whole-string
+            // guard must anchor with \z; this row is the PG-179 regression pin.
+            'trailing LF'      => [['client_id' => "abc\n"]],
             'interior space'   => [['client_id' => 'abc def']],
             'NUL byte'         => [['client_id' => "abc\x00def"]],
             'ESC sequence'     => [['client_id' => "abc\x1b[31mdef"]],
@@ -1156,26 +1154,59 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $this->assertNull($result['runtime_ticks']);
     }
 
+    /**
+     * PG-178: the recorded back-off is slept out on the INJECTED clock, not
+     * wall time. A fake clock + recording timerSleep prove the exact virtual
+     * delay was honored, the deadline cleared, and the next-request stamp
+     * moved — with zero real sleeping (the wall-time upper bound pins that).
+     */
     public function test_enforce_rate_limit_waits_out_recorded_back_off(): void
     {
         $provider = $this->makeProvider();
 
-        // Record a short back-off via Reflection, then assert enforceRateLimit
-        // sleeps it out and clears the deadline.
+        // 1_760_000_000.25 and +0.25 are exact IEEE-754 values — the virtual
+        // arithmetic below needs no float delta.
+        $now = 1_760_000_000.25;
+        /** @var list<float> $sleeps */
+        $sleeps = [];
+        $provider->setClockForTest(static function () use (&$now): float {
+            return $now;
+        });
+        $provider->setTimerSleepForTest(static function (float $seconds) use (&$now, &$sleeps): void {
+            $sleeps[] = $seconds;
+            $now += $seconds;
+        });
+
+        // Record a short back-off, then assert enforceRateLimit sleeps it out
+        // on the fake clock and clears the deadline.
         $reflection = new \ReflectionClass($provider);
         $prop = $reflection->getProperty('retryAfterUntil');
         $prop->setAccessible(true);
-        $deadline = microtime(true) + 0.15;
-        $prop->setValue($provider, $deadline);
+        $prop->setValue($provider, 1_760_000_000.5);
 
-        $start = microtime(true);
+        $wallStart = microtime(true);
         $this->invokePrivate($provider, 'enforceRateLimit', []);
-        $elapsed = microtime(true) - $start;
+        $wallElapsed = microtime(true) - $wallStart;
 
-        // It should have blocked until at least the deadline.
-        $this->assertGreaterThanOrEqual(0.14, $elapsed);
+        // Honored exactly: one virtual sleep of the remaining 0.25s, clock at
+        // the deadline — a second (rate-interval) sleep, none, or a fake sleep
+        // of the wrong length all land red here.
+        $this->assertSame([0.25], $sleeps, 'must sleep out exactly the recorded back-off on the injected clock');
+        $this->assertSame(1_760_000_000.5, $now);
         // And cleared the back-off so it is not re-applied next call.
         $this->assertSame(0.0, $prop->getValue($provider));
+        // The next-request stamp moved with the (fake) clock.
+        $this->assertSame(
+            1_760_000_000.5,
+            $this->readPrivate($provider, 'lastRequestTimestamp'),
+            'lastRequestTimestamp must be stamped from the injected clock',
+        );
+        // Zero wall sleeping — timing is driven entirely by the seam.
+        $this->assertLessThan(
+            0.05,
+            $wallElapsed,
+            'back-off must not sleep wall time when a fake clock is injected',
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -1959,7 +1990,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
      * Test enforceRateLimit when elapsed time is less than the rate limit
      * interval and there is no back-off. The method should sleep for the
      * remaining time and update lastRequestTimestamp.
-     * This exercises lines 709-727 (the second branch of enforceRateLimit).
+     * This exercises the second branch of enforceRateLimit().
      */
     public function test_enforce_rate_limit_without_backoff_applies_delay(): void
     {
@@ -1976,9 +2007,9 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $sleepCalled = false;
         $sleepDuration = 0.0;
 
-        $timerSleepProp = $reflection->getProperty('timerSleep');
-        $timerSleepProp->setAccessible(true);
-        $timerSleepProp->setValue($provider, static function (float $seconds) use (&$sleepCalled, &$sleepDuration): void {
+        // Replace makeProvider's usleep-backed fake with a recording fake
+        // via the visible seam (PG-178).
+        $provider->setTimerSleepForTest(static function (float $seconds) use (&$sleepCalled, &$sleepDuration): void {
             $sleepCalled = true;
             $sleepDuration = $seconds;
         });
@@ -2035,14 +2066,11 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $httpClientProp->setAccessible(true);
         $httpClientProp->setValue($provider, $fakeClient);
 
-        $noopFloat = $reflection->getProperty('timerSleep');
-        $noopFloat->setAccessible(true);
-        $noopFloat->setValue($provider, static function (float $s): void {
+        // No-op the timing closures via the visible test seams (PG-178).
+        $provider->setTimerSleepForTest(static function (float $s): void {
         });
 
-        $waitTick = $reflection->getProperty('waitTick');
-        $waitTick->setAccessible(true);
-        $waitTick->setValue($provider, static function (): void {
+        $provider->setWaitTickForTest(static function (): void {
         });
 
         $this->invokePrivate($provider, 'requestAndWait', ['https://api.myanimelist.net/v2/anime/1']);

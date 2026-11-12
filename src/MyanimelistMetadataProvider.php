@@ -845,7 +845,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
 
         $response = $this->requestAndWait($url);
         if ($response === null) {
-            $this->logger?->debug('MAL API produced no response; will retry on next request');
+            $this->logger?->debug('MAL API produced no response; the next lookup will fetch again');
 
             return null;
         }

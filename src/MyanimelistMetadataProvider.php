@@ -206,11 +206,15 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     private const WAIT_INTERVAL_SEC = 0.001;
 
     /**
-     * Plugin settings from plugin.json.
-     *
-     * @var array{client_id: string, use_ssl_verification?: bool}
+     * TLS certificate-verification posture, resolved ONCE at the constructor
+     * boundary from the `use_ssl_verification` setting (coercion table on
+     * {@see __construct()}). Fail-safe: only a genuine boolean `false`
+     * disables verification; every other value — absent, null, true, or any
+     * mistyped/ambiguous non-bool — resolves to `true`. Consumed by
+     * {@see getHttpClient()} when it builds the pooled client's stream
+     * context; nothing re-reads the raw settings array afterwards.
      */
-    private array $settings;
+    private bool $verifyTls;
 
     /**
      * The Client ID exactly as validated by the constructor boundary —
@@ -313,7 +317,21 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * @param array{client_id: string, use_ssl_verification?: bool} $settings
      *     Plugin settings from plugin.json. client_id is the MyAnimeList API
      *     Client ID, sent as the X-MAL-CLIENT-ID header on every request.
-     *     use_ssl_verification toggles TLS certificate verification (default true).
+     *     use_ssl_verification toggles TLS certificate verification (default
+     *     true). It is parsed here, once, into {@see $verifyTls} with this
+     *     fail-safe coercion table (MAL-13 direction: an ambiguous value can
+     *     never silently disable peer authentication):
+     *
+     *       | raw `use_ssl_verification` value          | $verifyTls |
+     *       |-------------------------------------------|------------|
+     *       | key absent / null                         | true       |
+     *       | bool true                                 | true       |
+     *       | bool false                                | false      |
+     *       | any other value (e.g. "false", "0", 0,    | true       |
+     *       |   "", "off", arrays — not a real bool)    |            |
+     *
+     *     Only the boolean `false` the plugin.json `"type": "boolean"`
+     *     setting stores for an unticked toggle is a genuine disable.
      *
      * @throws \InvalidArgumentException
      *     when the required secret `client_id` is missing or blank. The
@@ -353,7 +371,11 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         }
 
         $this->clientId = $clientId;
-        $this->settings = $settings;
+
+        // TLS posture boundary parse (coercion table in the docblock above):
+        // strict identity against bool false, so only a genuine boolean
+        // disable turns verification off — fail-safe for every other value.
+        $this->verifyTls = ($settings['use_ssl_verification'] ?? true) !== false;
         $this->clock = static fn(): float => microtime(true);
         $this->timerSleep = static function (float $seconds): void {
             Timer::sleep($seconds);
@@ -1049,9 +1071,10 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * This is the lazy "connect" step: the client is built on first use (the
      * first real API call), never at plugin-enable / worker-boot, keeping
      * {@see onEnable()} free of any socket setup. The TLS verification
-     * posture from `use_ssl_verification` is parsed HERE — the single point
-     * the vendored pool actually consults — and therefore stays fixed for the
-     * life of this provider instance (settings are constructor-injected).
+     * posture was already parsed at the constructor boundary into
+     * {@see $verifyTls}; this is the single point that hands it to the
+     * vendored pool (via the client-constructor `context`, the only TLS input
+     * it consults), so it stays fixed for the life of this provider instance.
      *
      * Disabling verification is logged as a warning: the credential-bearing
      * HTTPS path silently loses peer authentication and must never go quiet.
@@ -1062,19 +1085,21 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             return $this->httpClient;
         }
 
-        $verifyTls = ($this->settings['use_ssl_verification'] ?? true) !== false;
-        if ($verifyTls === false) {
+        if ($this->verifyTls === false) {
+            // Attribution: the channel is still TLS-encrypted; what is lost is
+            // authentication of the PEER, so the credential reaches a server
+            // whose identity nobody checked (MAL-09 wording).
             $this->logger?->warning(
                 'MAL plugin: use_ssl_verification is disabled, so TLS certificate '
                 . 'verification is OFF for ' . self::API_HOST . ' requests. Only use '
                 . 'this behind a trusted self-hosted proxy; the X-MAL-CLIENT-ID '
-                . 'credential then crosses the network unauthenticated.'
+                . 'credential then travels to a peer whose identity is not verified.'
             );
         }
 
         return $this->httpClient = new Client([
             'timeout' => self::HTTP_TIMEOUT_SEC,
-            'context' => self::tlsContext($verifyTls),
+            'context' => self::tlsContext($this->verifyTls),
         ]);
     }
 

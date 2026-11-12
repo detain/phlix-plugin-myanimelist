@@ -724,6 +724,82 @@ final class MyanimelistTransportTest extends TestCase
 
         $this->assertCount(1, $warnings, 'disabling verification must log exactly one warning');
         $this->assertStringContainsString('use_ssl_verification', $warnings[0]);
+        // MAL-09 attribution: the channel is still encrypted — what is lost is
+        // PEER authentication, so the warning must say so, not claim the
+        // credential "crosses the network unauthenticated".
+        $this->assertStringContainsString(
+            'credential then travels to a peer whose identity is not verified',
+            $warnings[0]
+        );
+        $this->assertStringNotContainsString('unauthenticated', $warnings[0]);
+    }
+
+    /**
+     * MAL-06 boundary parse: `use_ssl_verification` is resolved ONCE in the
+     * constructor into the typed `verifyTls` property, so the constructed
+     * provider already carries the posture before any client is built.
+     */
+    public function test_tls_posture_is_resolved_at_constructor_boundary(): void
+    {
+        $prop = new \ReflectionProperty(MyanimelistMetadataProvider::class, 'verifyTls');
+        $prop->setAccessible(true);
+
+        $this->assertTrue($prop->getValue(new TransportDriver(['client_id' => 'test-id'])));
+        $this->assertFalse($prop->getValue(new TransportDriver(
+            ['client_id' => 'test-id', 'use_ssl_verification' => false]
+        )));
+        $this->assertFalse(
+            (new \ReflectionClass(MyanimelistMetadataProvider::class))->hasProperty('settings'),
+            'the raw settings array must not be retained for later re-reads'
+        );
+    }
+
+    /**
+     * Non-bool / ambiguous `use_ssl_verification` values for the fail-safe
+     * rows of the constructor coercion table.
+     *
+     * @return array<string, array{0: mixed}>
+     */
+    public static function failSafeTlsSettingProvider(): array
+    {
+        return [
+            'null'          => [null],
+            'bool true'     => [true],
+            'string false'  => ['false'],
+            'string 0'      => ['0'],
+            'int 0'         => [0],
+            'empty string'  => [''],
+            'string off'    => ['off'],
+            'empty array'   => [[]],
+        ];
+    }
+
+    /**
+     * MAL-06 / MAL-13 fail-safe direction: every value other than a genuine
+     * boolean `false` resolves to verification ON — the strict context reaches
+     * the dialed pooled connection and no insecure-path warning is logged.
+     *
+     * @dataProvider failSafeTlsSettingProvider
+     */
+    public function test_non_false_tls_setting_values_fail_safe_to_strict_context(mixed $value): void
+    {
+        $warnings = [];
+        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+        $logger->method('warning')->willReturnCallback(
+            static function (string|\Stringable $message) use (&$warnings): void {
+                $warnings[] = (string) $message;
+            }
+        );
+
+        $ssl = $this->dialedSslContext(
+            ['client_id' => 'test-id', 'use_ssl_verification' => $value],
+            $logger
+        );
+
+        $this->assertTrue($ssl['ssl']['verify_peer'] ?? null);
+        $this->assertTrue($ssl['ssl']['verify_peer_name'] ?? null);
+        $this->assertFalse($ssl['ssl']['allow_self_signed'] ?? null);
+        $this->assertSame([], $warnings, 'a fail-safe (verified) posture must not log the insecure warning');
     }
 
     /**

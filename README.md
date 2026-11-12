@@ -49,7 +49,10 @@ The plugin is unsigned by design. Install via the Phlix admin UI:
 
 1. Sign in at [myanimelist.net](https://myanimelist.net/).
 2. Go to [API → Create ID](https://myanimelist.net/apiconfig).
-3. Create an app and copy the **Client ID** (the Client Secret is not needed for read-only metadata).
+3. Create an app, choosing **App Type** "web" or "other".
+4. MAL requires an **App Redirect URL**: any value works (e.g. `http://localhost`) —
+   this plugin uses only the Client ID and never runs an OAuth redirect flow.
+5. Copy the **Client ID** (the Client Secret is not needed for read-only metadata).
 
 ## Configuration
 

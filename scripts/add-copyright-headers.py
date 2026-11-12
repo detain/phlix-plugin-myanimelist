@@ -8,11 +8,15 @@ For each .php file under the given root (excluding vendor/, .git/, node_modules/
     docblock between <?php and the next line.
   - If the file already has the copyright notice, leave it unchanged.
   - Running this script twice produces identical output (idempotent).
+
+The @copyright year is taken from the current date at run time (date.today()),
+so headers inserted in later years carry the year they were written.
 """
 
 import os
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 # Walk from the repo root (the directory containing this script's parent, or the CWD when running standalone)
@@ -22,16 +26,31 @@ REPO_ROOT = SCRIPT_DIR.parent  # script is at <repo>/scripts/add-copyright-heade
 ROOT = REPO_ROOT
 COPYRIGHT_MARKER = "detain@interserver.net"
 
+# Docblock inserted after <?php; {description} and {year} are filled per run.
 HEADER_TEMPLATE = """\
-<?php
-
 /**
- * <one-line description>.
+ * {description}.
  *
- * @copyright 2026 Joe Huss <detain@interserver.net>
+ * @copyright {year} Joe Huss <detain@interserver.net>
  * @license   MIT
  */
 """
+
+# Word boundaries inside a camelCase / PascalCase identifier: lower/digit -> upper
+# ("MetadataProvider" -> "Metadata Provider") and the end of an acronym run
+# ("HTTPClient" -> "HTTP Client").
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def split_camel_case(segment: str) -> str:
+    """Split a camelCase/PascalCase segment into space-separated words.
+
+    Each word's first letter is upper-cased; the rest of the word is kept as-is
+    so acronyms survive (str.title() would turn "MetadataProvider" into
+    "Metadataprovider" and "HTTP" into "Http").
+    """
+    spaced = _CAMEL_BOUNDARY.sub(" ", segment).replace("_", " ").replace("-", " ")
+    return " ".join(w[:1].upper() + w[1:] for w in spaced.split())
 
 # Extensions / paths to exclude
 EXCLUDE_DIRS = {"vendor", ".git", "node_modules", ".phpunit.cache", ".caliber", ".remember"}
@@ -60,8 +79,8 @@ def one_line_description(file_path: Path) -> str:
     name = re.sub(r"\.+", ".", name).strip(".")
     if not name:
         name = rel.stem or "source"
-    # Capitalise nicely
-    return name.title().replace(".", " ")
+    # Split camelCase per path segment before capitalising (MAL-18)
+    return " ".join(split_camel_case(seg) for seg in name.split("."))
 
 
 def needs_header(content: str) -> bool:
@@ -104,14 +123,7 @@ def inject_header(content: str, file_path: Path) -> str:
 
     description = one_line_description(file_path)
 
-    header_block = f"""\
-/**
- * {description}.
- *
- * @copyright 2026 Joe Huss <detain@interserver.net>
- * @license   MIT
- */
-"""
+    header_block = HEADER_TEMPLATE.format(description=description, year=date.today().year)
 
     # Build the new content
     if rest.startswith("\n") or rest.startswith("\r"):

@@ -263,9 +263,12 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * consuming the MAL API with the stored Client ID behind the disabled
      * plugin's back. While latched, both bridge calls return empty without
      * touching transport, so the orphaned adapter surface goes inert
-     * immediately. The latch is per-instance and permanent: re-enable builds a
-     * FRESH provider instance (the server re-instantiates the entry class), so
-     * this flag never needs to open again.
+     * immediately. The latch is per-instance and only {@see onEnable()} opens
+     * it again: re-enable normally builds a FRESH provider instance (the
+     * server re-instantiates the entry class), for which that reset is a
+     * no-op; should a host ever re-enable the SAME instance, the reset makes
+     * it self-healing instead of leaving it silently inert (MAL-11). Nothing
+     * else ever reopens the latch.
      */
     private bool $disabled = false;
 
@@ -446,10 +449,16 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * Client ID — is deferred lazily to the first API call
      * ({@see getHttpClient()} / {@see httpGetJson()}), off the boot path.
      *
+     * It first reopens the PG-171 lifecycle latch ({@see $disabled}): a
+     * no-op for fresh instances, self-healing for a reused one — an
+     * instance that went through {@see onDisable()} and is enabled again
+     * goes live instead of staying silently inert (MAL-11).
+     *
      * @param ContainerInterface $container Host PSR-11 container.
      */
     public function onEnable(ContainerInterface $container): void
     {
+        $this->disabled = false;
         $this->registerWithMetadataManager($container);
     }
 
@@ -688,8 +697,9 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
      * routes through ({@see findIdByTitle()} / {@see fetchAnimeMetadata()})
      * return empty without touching transport, so the orphaned registration
      * can no longer consume the API with this plugin's Client ID. The latch
-     * is per-instance and permanent: a later re-enable operates on a fresh
-     * instance built by the loader.
+     * is per-instance: a later re-enable normally operates on a fresh
+     * instance built by the loader, and {@see onEnable()} reopens it should
+     * the same instance ever be re-enabled.
      *
      * @return void
      */

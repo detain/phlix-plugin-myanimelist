@@ -2270,9 +2270,10 @@ final class MyanimelistMetadataProviderTest extends TestCase
     }
 
     /**
-     * The latch is per-instance and permanent: re-enable builds a FRESH
-     * instance (the server's PluginLoader re-instantiates the entry class),
-     * so a disabled instance must never flip back to live on its own.
+     * The latch is per-instance and stays closed for the orphaned instance:
+     * re-enable normally builds a FRESH instance (the server's PluginLoader
+     * re-instantiates the entry class), so a disabled instance must never
+     * flip back to live on its own — only an explicit onEnable() reopens it.
      */
     public function test_disabled_latch_is_permanent_for_the_orphaned_instance(): void
     {
@@ -2283,5 +2284,25 @@ final class MyanimelistMetadataProviderTest extends TestCase
         $this->assertNull($provider->findIdByTitle('Hellsing'));
         $this->assertNull($provider->findIdByTitle('Hellsing'));
         $this->assertSame([], $provider->transportUrls);
+    }
+
+    /**
+     * MAL-11 self-heal: should a host ever re-enable the SAME instance after
+     * onDisable(), onEnable() reopens the latch so the bridge goes live again
+     * instead of staying silently inert.
+     */
+    public function test_on_enable_reopens_the_latch_on_a_reused_instance(): void
+    {
+        $container = $this->createMock(ContainerInterface::class);
+        $container->method('has')->willReturn(false);
+
+        $provider = $this->makeCountingProbeProvider();
+        $provider->onDisable();
+        $provider->onEnable($container);
+        $provider->transportUrls = [];
+
+        $this->assertSame(21, $provider->findIdByTitle('Hellsing'));
+        $this->assertNotSame([], $provider->fetchAnimeMetadata(21));
+        $this->assertCount(2, $provider->transportUrls, 're-enabled bridge must reach the transport');
     }
 }

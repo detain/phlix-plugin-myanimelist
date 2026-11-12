@@ -1746,7 +1746,7 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
             'vote_count'    => $anime['vote_count'],
             'poster_url'    => $anime['poster_url'],
             'fanart_url'    => $anime['fanart_url'],
-            'episodes'      => ($anime['episodes'] ?? 0) > 0 ? $anime['episodes'] : null,
+            'episodes'      => is_int($anime['episodes']) && $anime['episodes'] > 0 ? $anime['episodes'] : null,
             'type'          => $this->mapType($anime['media_type']),
             'mal_id'        => $anime['id'],
             'titles'        => array_values(array_unique($allTitles)),

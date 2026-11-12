@@ -21,7 +21,7 @@
             "required": false,
             "default": true,
             "tier": "advanced",
-            "label": "Verify SSL certificates",
+            "label": "Verify TLS certificates",
             "description": "Verify TLS certificates when calling the MyAnimeList API. Optional; default on. Disable only behind a self-hosted proxy with a self-signed certificate."
         }
     },

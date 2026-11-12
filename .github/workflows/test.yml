@@ -5,6 +5,12 @@ on:
     branches: [master, main]
   pull_request:
 
+# MAL-03 least privilege: the GITHUB_TOKEN of every job here only needs to read
+# the repository (checkout). Nothing in this workflow writes to GitHub, so the
+# token is pinned to read-only instead of inheriting the repo/org default.
+permissions:
+  contents: read
+
 jobs:
   phpunit:
     runs-on: ubuntu-26.04
@@ -13,7 +19,8 @@ jobs:
         # phlix-shared requires PHP ^8.3, so the matrix matches.
         php: ['8.3', '8.4']
     steps:
-      - uses: actions/checkout@v6
+      # MAL-04: pinned to the full SHA (estate-canonical; the v6 tag resolves here).
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Setup PHP ${{ matrix.php }}
         uses: shivammathur/setup-php@4424c9aab975b57bd706ee5a39c6b4334d6e4f60
@@ -40,10 +47,11 @@ jobs:
         # checksum, and the CODACY_API_TOKEN secret is unchanged since
         # 2026-07-27. The authorization flipped SERVER-side (Codacy's write
         # grant for this project — project token scope or the Codacy
-        # GitHub-App's repo access). A workflow `permissions:` block therefore
+        # GitHub-App's repo access). The workflow `permissions:` block above
         # cannot fix it: that block governs GITHUB_TOKEN, which this call does
-        # not use; and a secret-presence gate is vacuous — the secret is
-        # present, it simply no longer authorizes writes.
+        # not use (it is there for least privilege, MAL-03); and a
+        # secret-presence gate is vacuous — the secret is present, it simply
+        # no longer authorizes writes.
         #
         # Cure: a fail-closed enable switch. The step renders as SKIPPED — an
         # honest, unmistakable "this check is off" — rather than running on
@@ -62,8 +70,18 @@ jobs:
         # law (cf6edd3 lineage; mirrors anidb's committed posture); 89d6c85 is
         # the exact commit @v1 already resolved to on both the green and red
         # runs, so the pin moves zero behavior.
+        #
+        # MAL-01 secret isolation: the step also requires a trusted context —
+        # a push to this repository, or a pull request whose head lives in
+        # this repository. A fork PR (head repo != this repo) never reaches
+        # the step, so CODACY_API_TOKEN is never handed to fork-authored code
+        # regardless of how the enable switch or GitHub's fork-secret policy
+        # is set.
         uses: codacy/codacy-coverage-reporter-action@89d6c85cfafaec52c72b6c5e8b2878d33104c699
-        if: ${{ vars.CODACY_COVERAGE_ENABLED == 'true' }}
+        if: >-
+          ${{ vars.CODACY_COVERAGE_ENABLED == 'true'
+          && (github.event_name == 'push'
+          || github.event.pull_request.head.repo.full_name == github.repository) }}
         with:
           api-token: ${{ secrets.CODACY_API_TOKEN }}
           coverage-reports: ./coverage.xml
@@ -96,7 +114,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Setup PHP
         uses: shivammathur/setup-php@4424c9aab975b57bd706ee5a39c6b4334d6e4f60

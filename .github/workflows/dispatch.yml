@@ -6,6 +6,12 @@ on:
   release:
     types: [published]
 
+# MAL-03 least privilege: the dispatch call authenticates with PHLIX_BOT_TOKEN,
+# not GITHUB_TOKEN, so the workflow token is pinned to read-only rather than
+# inheriting the repo/org default write scopes.
+permissions:
+  contents: read
+
 jobs:
   dispatch:
     runs-on: ubuntu-26.04

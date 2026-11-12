@@ -1987,6 +1987,56 @@ final class MyanimelistMetadataProviderTest extends TestCase
     // -------------------------------------------------------------------------
 
     /**
+     * MAL-02/MAL-08: two callers interleaving across the yield each reserve a
+     * distinct slot (no shared-slot burst), a newer back-off survives the
+     * first caller's wake, and a throwing sleep is contained.
+     */
+    public function test_enforce_rate_limit_reserves_slot_before_yield_and_contains_sleep_throw(): void
+    {
+        $provider = $this->makeProvider();
+        $now = 1_760_000_000.0;
+        $provider->setClockForTest(static function () use (&$now): float {
+            return $now;
+        });
+
+        $ref = new \ReflectionClass($provider);
+        $last = $ref->getProperty('lastRequestTimestamp');
+        $last->setAccessible(true);
+        $until = $ref->getProperty('retryAfterUntil');
+        $until->setAccessible(true);
+        $until->setValue($provider, 1_760_000_002.0);
+
+        /** @var list<float> $sleeps */
+        $sleeps = [];
+        $nested = false;
+        $self = $this;
+        // First caller yields; while it sleeps a second caller enters and a
+        // newer back-off is recorded.
+        $provider->setTimerSleepForTest(static function (float $s) use (&$sleeps, &$nested, $self, $provider, $until): void {
+            $sleeps[] = $s;
+            if (!$nested) {
+                $nested = true;
+                $until->setValue($provider, 1_760_000_009.0);
+                $self->invokePrivate($provider, 'enforceRateLimit', []);
+            }
+        });
+        $this->invokePrivate($provider, 'enforceRateLimit', []);
+
+        $this->assertSame(2.0, $sleeps[0]);
+        // Second caller: slot after the first's reservation, bounded by the newer deadline.
+        $this->assertSame(9.0, $sleeps[1]);
+        $this->assertSame(1_760_000_009.0, $last->getValue($provider));
+
+        // Sleep that throws is contained.
+        $provider->setTimerSleepForTest(static function (float $s): void {
+            throw new \RuntimeException('boom');
+        });
+        $until->setValue($provider, 0.0);
+        $this->invokePrivate($provider, 'enforceRateLimit', []);
+        $this->assertSame(1_760_000_010.0, $last->getValue($provider));
+    }
+
+    /**
      * Test enforceRateLimit when elapsed time is less than the rate limit
      * interval and there is no back-off. The method should sleep for the
      * remaining time and update lastRequestTimestamp.

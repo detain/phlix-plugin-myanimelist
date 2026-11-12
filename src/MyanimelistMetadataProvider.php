@@ -1266,20 +1266,29 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
     {
         $now = ($this->clock)();
 
-        // Honour a 429/503 Retry-After back-off first: do not issue the next
-        // request until the recorded deadline has passed.
-        if ($this->retryAfterUntil > $now) {
-            ($this->timerSleep)($this->retryAfterUntil - $now);
+        // Reserve this caller's slot BEFORE yielding: the next permitted
+        // instant honours both the inter-request interval and any recorded
+        // Retry-After deadline. Publishing it synchronously means a concurrent
+        // caller entering while we sleep computes its own slot after ours.
+        $observedDeadline = $this->retryAfterUntil;
+        $next = max($now, $this->lastRequestTimestamp + self::RATE_LIMIT_INTERVAL_SEC, $observedDeadline);
+        $this->lastRequestTimestamp = $next;
+
+        $wait = $next - $now;
+        if ($wait > 0.0) {
+            try {
+                ($this->timerSleep)($wait);
+            } catch (\Throwable $e) {
+                // Preserve the never-throw posture of the lookup path.
+                $this->logger?->debug('MAL rate-limit sleep failed: ' . $this->scrubForLog($e->getMessage()));
+            }
+        }
+
+        // Clear the back-off only if it is still the deadline we observed; a
+        // newer 429/503 recorded while we slept must survive.
+        if ($observedDeadline > 0.0 && $this->retryAfterUntil === $observedDeadline) {
             $this->retryAfterUntil = 0.0;
-            $now = ($this->clock)();
         }
-
-        $elapsed = $now - $this->lastRequestTimestamp;
-        if ($elapsed < self::RATE_LIMIT_INTERVAL_SEC) {
-            ($this->timerSleep)(self::RATE_LIMIT_INTERVAL_SEC - $elapsed);
-        }
-
-        $this->lastRequestTimestamp = ($this->clock)();
     }
 
     // -------------------------------------------------------------------------

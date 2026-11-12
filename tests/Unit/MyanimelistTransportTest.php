@@ -1465,6 +1465,78 @@ final class MyanimelistTransportTest extends TestCase
         $this->assertSame(1, $result['id']);
     }
 
+    /**
+     * Drive one oversized response through a provider with a warning spy
+     * attached and return the warnings it logged.
+     *
+     * @return list<string>
+     */
+    private function capWarningsFor(Response $response): array
+    {
+        $warnings = [];
+        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+        $logger->method('warning')->willReturnCallback(
+            static function (string|\Stringable $message) use (&$warnings): void {
+                $warnings[] = (string) $message;
+            }
+        );
+
+        $provider = $this->makeProvider(['api.myanimelist.net' => $response]);
+        $provider->setLogger($logger);
+
+        $this->assertNull($provider->driveHttpGetJson('https://api.myanimelist.net/v2/anime/1'));
+        $this->assertSame([], $this->cacheOf($provider));
+
+        return $warnings;
+    }
+
+    /**
+     * MAL-15: the three body-cap checks keep distinct phrasings (declared
+     * Content-Length vs stream size vs bytes read) and render both the
+     * observed size and the cap as 'N,NNN,NNN-byte (M MiB)' instead of a raw
+     * digit run. RED before the fix: the warnings interpolated bare integers
+     * ('8388609-byte … 8388608-byte response cap') and the bytes-read check
+     * named no observed size at all.
+     */
+    public function test_body_cap_warnings_render_human_readable_sizes(): void
+    {
+        $cap = $this->maxResponseBytes();
+        $this->assertSame(8 * 1024 * 1024, $cap, 'pinned strings below assume the 8 MiB cap');
+        $capText = '8,388,608-byte (8 MiB) response cap; response rejected, not cached.';
+
+        // 1. Declared Content-Length over the cap (header alone decides).
+        $this->assertSame(
+            ['MAL API declared Content-Length: 9,000,000-byte (~8.58 MiB) body, over the ' . $capText],
+            $this->capWarningsFor(new Response(200, ['Content-Length' => '9000000'], '{"id":1}'))
+        );
+
+        // 2. No header, but the stream reports its size up front.
+        $oversize = '{"id":1,"pad":"' . str_repeat('x', $cap - 17 + 1) . '"}';
+        $this->assertSame($cap + 1, strlen($oversize));
+        $this->assertSame(
+            ['MAL API stream size: 8,388,609-byte (~8 MiB) body, over the ' . $capText],
+            $this->capWarningsFor(new Response(200, [], $oversize))
+        );
+
+        // 3. Unknown stream size (null getSize): the bytes actually read decide.
+        $pumped = false;
+        $unsized = new \Workerman\Psr7\PumpStream(
+            static function () use (&$pumped, $cap): string|false {
+                if ($pumped) {
+                    return false;
+                }
+                $pumped = true;
+
+                return str_repeat('x', $cap + 1048576);
+            }
+        );
+        $this->assertNull($unsized->getSize(), 'fixture must hide its size from the stream-size check');
+        $this->assertSame(
+            ['MAL API bytes read: 9,437,184-byte (9 MiB) body, over the ' . $capText],
+            $this->capWarningsFor(new Response(200, [], $unsized))
+        );
+    }
+
     // -------------------------------------------------------------------------
     // PG-174: only JSON objects are cacheable responses
     // -------------------------------------------------------------------------

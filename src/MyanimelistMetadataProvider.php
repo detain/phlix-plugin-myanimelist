@@ -1014,8 +1014,9 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         if ($declaredLength !== '' && ctype_digit($declaredLength)
             && (int) $declaredLength > self::MAX_RESPONSE_BYTES) {
             $this->logger?->warning(
-                'MAL API declared a ' . $declaredLength . '-byte body, over the '
-                . self::MAX_RESPONSE_BYTES . '-byte response cap; response rejected, not cached.'
+                'MAL API declared Content-Length: ' . self::formatByteSize($declaredLength)
+                . ' body, over the ' . self::formatByteSize(self::MAX_RESPONSE_BYTES)
+                . ' response cap; response rejected, not cached.'
             );
 
             return null;
@@ -1025,18 +1026,21 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         $streamSize = $stream->getSize();
         if ($streamSize !== null && $streamSize > self::MAX_RESPONSE_BYTES) {
             $this->logger?->warning(
-                'MAL API returned a ' . $streamSize . '-byte body, over the '
-                . self::MAX_RESPONSE_BYTES . '-byte response cap; response rejected, not cached.'
+                'MAL API stream size: ' . self::formatByteSize($streamSize)
+                . ' body, over the ' . self::formatByteSize(self::MAX_RESPONSE_BYTES)
+                . ' response cap; response rejected, not cached.'
             );
 
             return null;
         }
 
         $body = $stream->getContents();
-        if (strlen($body) > self::MAX_RESPONSE_BYTES) {
+        $bytesRead = strlen($body);
+        if ($bytesRead > self::MAX_RESPONSE_BYTES) {
             $this->logger?->warning(
-                'MAL API body exceeded the ' . self::MAX_RESPONSE_BYTES
-                . '-byte response cap; response rejected, not cached.'
+                'MAL API bytes read: ' . self::formatByteSize($bytesRead)
+                . ' body, over the ' . self::formatByteSize(self::MAX_RESPONSE_BYTES)
+                . ' response cap; response rejected, not cached.'
             );
 
             return null;
@@ -1073,6 +1077,38 @@ class MyanimelistMetadataProvider implements LifecycleInterface, MetadataSourceI
         }
 
         return $decoded;
+    }
+
+    /**
+     * Render a byte count for the body-cap warnings as
+     * 'N,NNN,NNN-byte (M MiB)' — the exact count stays readable, the MiB
+     * figure gives scale at a glance. A non-whole MiB value is rounded to
+     * two decimals and marked '~' so a one-byte overshoot never reads as
+     * equal to the cap without the exact count beside it.
+     *
+     * Accepts the raw declared Content-Length digit string as well as an
+     * int, so an over-PHP_INT_MAX header is rendered verbatim (grouped)
+     * instead of being silently clamped by an (int) cast.
+     *
+     * @param int|numeric-string $bytes Non-negative byte count.
+     */
+    private static function formatByteSize(int|string $bytes): string
+    {
+        $digits = ltrim((string) $bytes, '0');
+        if ($digits === '') {
+            $digits = '0';
+        }
+
+        $grouped = strrev(implode(',', str_split(strrev($digits), 3)));
+
+        $mib = (float) $digits / 1048576;
+        $rounded = round($mib, 2);
+        $mibText = rtrim(rtrim(number_format($rounded, 2, '.', ','), '0'), '.');
+        if ($rounded * 1048576 !== (float) $digits) {
+            $mibText = '~' . $mibText;
+        }
+
+        return $grouped . '-byte (' . $mibText . ' MiB)';
     }
 
     /**

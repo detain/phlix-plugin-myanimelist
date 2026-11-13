@@ -712,7 +712,11 @@ if ($unreachable !== []) {
     }
 
     fail(
-        sprintf('%d advisory repository/ies were unreachable — the audit measured nothing.', count($names)),
+        sprintf(
+            '%d advisory %s — the audit measured nothing.',
+            count($names),
+            count($names) === 1 ? 'repository was unreachable' : 'repositories were unreachable',
+        ),
         ...$names,
     );
 }
@@ -727,9 +731,11 @@ if ($ignored !== []) {
     annotate(
         'notice',
         sprintf(
-            '%d security advisory/ies affecting %d package(s) are IGNORED by composer config — acknowledged, not fixed.',
+            '%d security %s affecting %d package(s) %s IGNORED by composer config — acknowledged, not fixed.',
             countAdvisories($ignored),
+            countAdvisories($ignored) === 1 ? 'advisory' : 'advisories',
             count($ignored),
+            countAdvisories($ignored) === 1 ? 'is' : 'are',
         ),
         ...renderAdvisoryLines($ignored, $corpus),
     );
@@ -775,8 +781,9 @@ if ($advisories !== []) {
 
     fail(
         sprintf(
-            'Security audit FAILED — %d advisory/ies affecting %d package(s) (%d require, %d require-dev).',
+            'Security audit FAILED — %d %s affecting %d package(s) (%d require, %d require-dev).',
             countAdvisories($advisories),
+            countAdvisories($advisories) === 1 ? 'advisory' : 'advisories',
             count($advisories),
             $byScope['require'],
             $byScope['require-dev'],

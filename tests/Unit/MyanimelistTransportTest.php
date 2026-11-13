@@ -11,6 +11,7 @@ declare(strict_types=1);
 
 namespace Phlix\Myanimelist\Tests\Unit;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use Phlix\Myanimelist\MyanimelistMetadataProvider;
 use PHPUnit\Framework\TestCase;
 use Workerman\Http\Client;
@@ -700,7 +701,7 @@ final class MyanimelistTransportTest extends TestCase
     public function test_disabled_tls_setting_reaches_dialed_connection_as_insecure_context_and_warns(): void
     {
         $warnings = [];
-        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+        $logger = $this->createStub(\Psr\Log\LoggerInterface::class);
         $logger->method('warning')->willReturnCallback(
             static function (string|\Stringable $message) use (&$warnings): void {
                 $warnings[] = (string) $message;
@@ -779,12 +780,12 @@ final class MyanimelistTransportTest extends TestCase
      * boolean `false` resolves to verification ON — the strict context reaches
      * the dialed pooled connection and no insecure-path warning is logged.
      *
-     * @dataProvider failSafeTlsSettingProvider
      */
+    #[DataProvider('failSafeTlsSettingProvider')]
     public function test_non_false_tls_setting_values_fail_safe_to_strict_context(mixed $value): void
     {
         $warnings = [];
-        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+        $logger = $this->createStub(\Psr\Log\LoggerInterface::class);
         $logger->method('warning')->willReturnCallback(
             static function (string|\Stringable $message) use (&$warnings): void {
                 $warnings[] = (string) $message;
@@ -1135,7 +1136,7 @@ final class MyanimelistTransportTest extends TestCase
                 };
             };
 
-            $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+            $logger = $this->createStub(\Psr\Log\LoggerInterface::class);
             $logger->method('warning')->willReturnCallback($capture('warning'));
             $logger->method('debug')->willReturnCallback($capture('debug'));
 
@@ -1171,14 +1172,14 @@ final class MyanimelistTransportTest extends TestCase
      * line break) would enable terminal/log injection for whoever tails the
      * file. Scrub to printable ASCII, cap the length, keep the diagnosis.
      *
-     * @dataProvider dirtyTransportExceptionProvider
      */
+    #[DataProvider('dirtyTransportExceptionProvider')]
     public function test_transport_exception_messages_are_scrubbed_before_logging(string $dirty, string $marker): void
     {
         /** @var list<array{0: string, 1: string}> $records */
         $records = [];
 
-        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+        $logger = $this->createStub(\Psr\Log\LoggerInterface::class);
         $logger->method('debug')->willReturnCallback(
             /** @param mixed $message */
             static function ($message) use (&$records): void {
@@ -1474,7 +1475,7 @@ final class MyanimelistTransportTest extends TestCase
     private function capWarningsFor(Response $response): array
     {
         $warnings = [];
-        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+        $logger = $this->createStub(\Psr\Log\LoggerInterface::class);
         $logger->method('warning')->willReturnCallback(
             static function (string|\Stringable $message) use (&$warnings): void {
                 $warnings[] = (string) $message;

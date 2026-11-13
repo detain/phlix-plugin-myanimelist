@@ -12,6 +12,7 @@ declare(strict_types=1);
 
 namespace Phlix\Myanimelist\Tests\Unit;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use Phlix\Myanimelist\MyanimelistMetadataProvider;
 use Phlix\Shared\Metadata\MetadataSourceInterface;
 use PHPUnit\Framework\TestCase;
@@ -63,9 +64,9 @@ final class MyanimelistMetadataProviderTest extends TestCase
     }
 
     /**
-     * @dataProvider blankClientIdProvider
      * @param array<string, mixed> $settings
      */
+    #[DataProvider('blankClientIdProvider')]
     public function test_constructor_throws_on_blank_required_client_id(array $settings): void
     {
         $this->expectException(\InvalidArgumentException::class);
@@ -117,9 +118,9 @@ final class MyanimelistMetadataProviderTest extends TestCase
      * non-ASCII must be refused at the constructor, not laundered into the
      * wire. The raw value is checked: trimming first would hide the CR/LF.
      *
-     * @dataProvider unsafeClientIdProvider
      * @param array<string, mixed> $settings
      */
+    #[DataProvider('unsafeClientIdProvider')]
     public function test_constructor_throws_on_unsafe_client_id_charset(array $settings): void
     {
         $this->expectException(\InvalidArgumentException::class);
@@ -182,9 +183,9 @@ final class MyanimelistMetadataProviderTest extends TestCase
      * no usable ID" — until now only a *missing* id honored it; junk ids were
      * laundered to 0 and shipped downstream.
      *
-     * @dataProvider unusableAnimeIdProvider
      * @param array<string, mixed> $raw
      */
+    #[DataProvider('unusableAnimeIdProvider')]
     public function test_parse_anime_response_returns_null_for_unusable_id(array $raw): void
     {
         $this->assertNull($this->invokePrivate($this->makeProvider(), 'parseAnimeResponse', [$raw]));
@@ -356,7 +357,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
      */
     public function test_on_enable_completes_without_network_io_or_rate_limit_delay(): void
     {
-        $container = $this->createMock(ContainerInterface::class);
+        $container = $this->createStub(ContainerInterface::class);
         $container->method('has')->willReturn(false);
 
         $provider = $this->makeProvider();
@@ -401,7 +402,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
             }
         };
 
-        $container = $this->createMock(ContainerInterface::class);
+        $container = $this->createStub(ContainerInterface::class);
         $container->method('has')
             ->willReturnCallback(static fn (string $id): bool => $id === $managerClass);
         $container->method('get')
@@ -439,9 +440,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
     // extractAnimeName
     // -------------------------------------------------------------------------
 
-    /**
-     * @dataProvider filenameProvider
-     */
+    #[DataProvider('filenameProvider')]
     public function test_extracts_anime_name_from_various_release_naming_patterns(
         string $input,
         ?string $expectedTitle
@@ -1033,9 +1032,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
     // mapType
     // -------------------------------------------------------------------------
 
-    /**
-     * @dataProvider typeProvider
-     */
+    #[DataProvider('typeProvider')]
     public function test_maps_media_type(?string $input, ?string $expected): void
     {
         $result = $this->invokePrivate($this->makeProvider(), 'mapType', [$input]);
@@ -1066,9 +1063,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
     // mapStatus
     // -------------------------------------------------------------------------
 
-    /**
-     * @dataProvider statusProvider
-     */
+    #[DataProvider('statusProvider')]
     public function test_maps_status_to_phlix_vocabulary(?string $input, ?string $expected): void
     {
         $result = $this->invokePrivate($this->makeProvider(), 'mapStatus', [$input]);
@@ -1096,9 +1091,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
     // mapRuntimeTicks
     // -------------------------------------------------------------------------
 
-    /**
-     * @dataProvider runtimeProvider
-     */
+    #[DataProvider('runtimeProvider')]
     public function test_maps_runtime_ticks(?int $seconds, ?int $expected): void
     {
         $result = $this->invokePrivate($this->makeProvider(), 'mapRuntimeTicks', [$seconds]);
@@ -1216,7 +1209,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
     public function test_set_logger_accepts_psr_logger(): void
     {
         $provider = $this->makeProvider();
-        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+        $logger = $this->createStub(\Psr\Log\LoggerInterface::class);
 
         $provider->setLogger($logger);
 
@@ -1253,9 +1246,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
     // scoreCandidateTitles (private helper)
     // -------------------------------------------------------------------------
 
-    /**
-     * @dataProvider scoreCandidateTitlesProvider
-     */
+    #[DataProvider('scoreCandidateTitlesProvider')]
     public function test_score_candidate_titles(array $titles, string $queryLower, int $queryLen, int $expected): void
     {
         $result = $this->invokePrivate($this->makeProvider(), 'scoreCandidateTitles', [$titles, $queryLower, $queryLen]);
@@ -2343,7 +2334,7 @@ final class MyanimelistMetadataProviderTest extends TestCase
      */
     public function test_on_enable_reopens_the_latch_on_a_reused_instance(): void
     {
-        $container = $this->createMock(ContainerInterface::class);
+        $container = $this->createStub(ContainerInterface::class);
         $container->method('has')->willReturn(false);
 
         $provider = $this->makeCountingProbeProvider();

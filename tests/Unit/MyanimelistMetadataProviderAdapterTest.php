@@ -11,6 +11,7 @@ declare(strict_types=1);
 
 namespace Phlix\Myanimelist\Tests\Unit;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use Phlix\Media\Metadata\MetadataProviderInterface;
 use Phlix\Myanimelist\MyanimelistMetadataProvider;
 use Phlix\Myanimelist\MyanimelistMetadataProviderAdapter;
@@ -239,7 +240,7 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
             }
         };
 
-        $container = $this->createMock(ContainerInterface::class);
+        $container = $this->createStub(ContainerInterface::class);
         $container->method('has')
             ->willReturnCallback(static fn (string $id): bool => $id === $managerClass);
         $container->method('get')
@@ -311,9 +312,7 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
     // stringOr (private static helper)
     // -------------------------------------------------------------------------
 
-    /**
-     * @dataProvider stringOrProvider
-     */
+    #[DataProvider('stringOrProvider')]
     public function test_string_or(mixed $value, string $fallback, string $expected): void
     {
         $reflection = new \ReflectionClass(MyanimelistMetadataProviderAdapter::class);
@@ -345,9 +344,7 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
     // parseMalId (private static helper)
     // -------------------------------------------------------------------------
 
-    /**
-     * @dataProvider parseMalIdProvider
-     */
+    #[DataProvider('parseMalIdProvider')]
     public function test_parse_mal_id(string $input, ?int $expected): void
     {
         $reflection = new \ReflectionClass(MyanimelistMetadataProviderAdapter::class);
@@ -578,7 +575,7 @@ final class MyanimelistMetadataProviderAdapterTest extends TestCase
             }
         };
 
-        $container = $this->createMock(ContainerInterface::class);
+        $container = $this->createStub(ContainerInterface::class);
         $container->method('has')
             ->willReturnCallback(static fn (string $id): bool => $id === $managerClass);
         $container->method('get')
